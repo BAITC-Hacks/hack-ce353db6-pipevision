@@ -52,7 +52,7 @@ WindAgent решает задачу кейса. Для каждой даты в�
   - `scripts/fetch_osm_context.py` — раскладка парка (15 турбин ВЭС «Нурлы») и застройка из OpenStreetMap → `data/terrain/osm_context.json`;
   - страница `viz/index.html` (three.js с CDN) открывается по `file://` без сервера. На ней можно выбрать дату выпуска и пролистать 48 часов: ветер на 100 м, P10/P50/P90 парка, развороты роторов, все турбины парка (наши T1/T2 выделены), посёлок Нурлы и конус наветренной стороны с числом турбин парка в нём (при западном ветре — до 4 турбин перед T1, при восточном — сектор свободен);
   - это визуализация прогноза Open-Meteo в одной точке, а не CFD-расчёт обтекания рельефа.
-- **Воспроизводимость:** `Makefile`, `Dockerfile`, `.env.example`, `requirements.lock`, 21 офлайн-тест `pytest` (меньше минуты), включая сквозной прогон агента, проверку fallback при недоступной LLM и проверку фактов в тексте.
+- **Воспроизводимость:** `Makefile`, `Dockerfile`, `.env.example`, `requirements.lock`, 28 офлайн-тестов `pytest` (около минуты), включая сквозной прогон агента, проверку fallback при недоступной LLM, проверку фактов в тексте и прототип калибровки из исследования R2.
 
 ## 4. Как работает решение
 
@@ -175,7 +175,7 @@ flowchart LR
 | `src/wind_agent/cli.py` | командная строка `wind-agent` |
 | `scripts/make_figures.py`, `scripts/make_replay_figures.py` | графики бэктеста и прогона тестового периода → `outputs/figures/*.png` |
 | `scripts/fetch_dem.py`, `scripts/build_viz_data.py`, `viz/` | рельеф (Copernicus DEM GLO-90 через Open-Meteo Elevation API) → `data/terrain/`; данные 3D-сцены → `viz/data/viz_data.js`, роза ветров → `viz/wind_rose.png` |
-| `tests/` | 21 офлайн-тест: часовой пояс, SCADA, архивный прогноз «как в прошлом», признаки, модель, сквозной прогон агента без LLM и со сбоем LLM (fallback на правила, те же числа), проверка фактов в нарративе |
+| `tests/` | 28 офлайн-тестов: часовой пояс, SCADA, архивный прогноз «как в прошлом», признаки, модель, сквозной прогон агента без LLM и со сбоем LLM (fallback на правила, те же числа), проверка фактов в нарративе, прототип калибровки (R2) |
 
 ### Агентный цикл
 
@@ -459,7 +459,7 @@ wind-agent backtest
 ├── scripts/                          # make_figures.py, fetch_dem.py, build_viz_data.py
 ├── viz/                              # index.html (three.js), data/viz_data.js, wind_rose.png, README.md
 ├── tests/                            # pytest, офлайн
-└── docs/                             # ТЗ, положение, анализ данных (01_analysis.md), план (02_plan.md)
+└── docs/                             # ТЗ, положение, анализ данных (01_analysis.md), план (02_plan.md), research/ — исследования (R2: калибровка)
 ```
 
 ## Раскрытие сторонних компонентов
