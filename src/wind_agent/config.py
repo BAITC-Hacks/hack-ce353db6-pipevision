@@ -36,6 +36,12 @@ WEATHER_VARS = [
     "wind_direction_100m", "wind_gusts_10m", "temperature_2m", "surface_pressure",
 ]
 LEAD_DAYS = (1, 2)             # previous_day1 → часы 1–24, previous_day2 → часы 25–48
+
+# Ансамбль моделей погоды: помимо best_match (лучшая модель по мнению Open-Meteo) берём три глобальные
+# модели по отдельности. Их среднее коррелирует с замером ветра на 0.78 против 0.71 у одной модели,
+# MAE мощности ниже на ~5 % (см. docs/01_analysis.md). Если какой-то модели нет, признаки заполняются best_match.
+ENSEMBLE_MODELS = ["gfs_seamless", "icon_seamless", "ecmwf_ifs025"]
+ENSEMBLE_VARS = ["wind_speed_100m", "wind_speed_10m", "temperature_2m"]
 PREVIOUS_RUNS_START = "2024-02-16"  # с этой даты Open-Meteo хранит архив предыдущих запусков
 
 # Фильтр качества обучающей выборки: простои/ограничения при сильном ветре

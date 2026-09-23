@@ -66,11 +66,15 @@ def training_frame(turbine: str, wx: WeatherClient, start: str = config.PREVIOUS
     """
     scada = load_hourly(turbine)
     raw = wx.previous_runs(turbine, start, end).set_index("time")
+    ens = {m: d.set_index("time") for m, d in wx.ensemble_previous_runs(turbine, start, end).items()}
     parts = []
     for lead in config.LEAD_DAYS:
         cols = {f"{v}_previous_day{lead}": v for v in config.WEATHER_VARS}
         f = raw[list(cols)].rename(columns=cols)
         f["lead_day"] = lead
+        for m, d in ens.items():
+            for v in config.ENSEMBLE_VARS:
+                f[f"{m}_{v}"] = d[f"{v}_previous_day{lead}"].reindex(f.index)
         parts.append(f)
     feats = pd.concat(parts)
     df = feats.join(scada, how="inner")

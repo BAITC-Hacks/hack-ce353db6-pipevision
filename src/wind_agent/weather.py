@@ -62,19 +62,34 @@ class WeatherClient:
         return df
 
     # ---------------------------------------------------------------- public
-    def previous_runs(self, turbine: str, start: str, end: str, lead_days=config.LEAD_DAYS) -> pd.DataFrame:
-        """Архивные прогнозы: колонки var, var_previous_day1, var_previous_day2 (UTC, почасово)."""
+    def previous_runs(self, turbine: str, start: str, end: str, lead_days=config.LEAD_DAYS,
+                      model: str = "best_match") -> pd.DataFrame:
+        """Архивные прогнозы: колонки var, var_previous_day1, var_previous_day2 (UTC, почасово).
+
+        model="best_match" — полный набор WEATHER_VARS; для отдельных моделей ансамбля — только ENSEMBLE_VARS.
+        """
         lat, lon = config.TURBINES[turbine]
+        variables = config.WEATHER_VARS if model == "best_match" else config.ENSEMBLE_VARS
         hourly = []
-        for v in config.WEATHER_VARS:
+        for v in variables:
             hourly += [v] + [f"{v}_previous_day{d}" for d in lead_days]
+        params = dict(latitude=lat, longitude=lon, start_date=start, end_date=end,
+                      hourly=",".join(hourly), timezone="UTC", wind_speed_unit="ms")
+        kind = "prevruns" if model == "best_match" else f"prevruns-{model}"
+        if model != "best_match":
+            params["models"] = model
 
-        def fetch():
-            return self._get(PREVIOUS_RUNS_URL, dict(
-                latitude=lat, longitude=lon, start_date=start, end_date=end,
-                hourly=",".join(hourly), timezone="UTC", wind_speed_unit="ms"))
+        return self._cached_range(kind, turbine, start, end, lambda: self._get(PREVIOUS_RUNS_URL, params))
 
-        return self._cached_range("prevruns", turbine, start, end, fetch)
+    def ensemble_previous_runs(self, turbine: str, start: str, end: str) -> dict[str, pd.DataFrame]:
+        """Архивные прогнозы каждой модели ансамбля; модель, которая недоступна, просто пропускается."""
+        out = {}
+        for m in config.ENSEMBLE_MODELS:
+            try:
+                out[m] = self.previous_runs(turbine, start, end, model=m)
+            except Exception as e:  # noqa: BLE001 — ансамбль опционален, работаем на best_match
+                log.warning("модель %s недоступна (%s), пропускаем", m, e)
+        return out
 
     def historical_forecast(self, turbine: str, start: str, end: str) -> pd.DataFrame:
         """Прогноз с лагом 0 (склейка свежих запусков) — для истории до 16.02.2024."""
@@ -88,17 +103,28 @@ class WeatherClient:
         return self._cached_range("histforecast", turbine, start, end, fetch)
 
     def live_forecast(self, turbine: str, forecast_days: int = 3) -> pd.DataFrame:
-        """Оперативный прогноз последнего запуска (без кэша — он меняется каждые несколько часов)."""
+        """Оперативный прогноз последнего запуска (без кэша — он меняется каждые несколько часов).
+
+        Колонки: WEATHER_VARS (best_match) + `{model}_{var}` для моделей ансамбля (если доступны).
+        """
         lat, lon = config.TURBINES[turbine]
-        df = self._get(FORECAST_URL, dict(
-            latitude=lat, longitude=lon, forecast_days=forecast_days, past_days=1,
-            hourly=",".join(config.WEATHER_VARS), timezone="UTC", wind_speed_unit="ms"))
-        return df
+        base = dict(latitude=lat, longitude=lon, forecast_days=forecast_days, past_days=1,
+                    timezone="UTC", wind_speed_unit="ms")
+        df = self._get(FORECAST_URL, {**base, "hourly": ",".join(config.WEATHER_VARS)}).set_index("time")
+        for m in config.ENSEMBLE_MODELS:
+            try:
+                e = self._get(FORECAST_URL, {**base, "hourly": ",".join(config.ENSEMBLE_VARS), "models": m}).set_index("time")
+                for v in config.ENSEMBLE_VARS:
+                    df[f"{m}_{v}"] = e[v].reindex(df.index)
+            except Exception as e:  # noqa: BLE001
+                log.warning("live: модель %s недоступна (%s)", m, e)
+        return df.reset_index()
 
     def prefetch(self, start: str = "2026-01-30", end: str = "2026-03-02") -> None:
-        """Один запрос на весь тестовый период для каждой турбины, чтобы не плодить мелкие файлы кэша."""
+        """Один запрос на весь тестовый период для каждой турбины и модели, чтобы не плодить мелкие файлы кэша."""
         for t in config.TURBINES:
             self.previous_runs(t, start, end)
+            self.ensemble_previous_runs(t, start, end)
 
     def archived_forecast(self, turbine: str, issue_date: str) -> pd.DataFrame:
         """Прогноз, каким он был в конце дня `issue_date` (местное время) на следующие 48 часов.
@@ -116,10 +142,15 @@ class WeatherClient:
         start = (targets_utc.min() - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
         end = (targets_utc.max() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
         raw = self.previous_runs(turbine, start, end).set_index("time")
+        ens = {m: d.set_index("time") for m, d in self.ensemble_previous_runs(turbine, start, end).items()}
         rows = []
         for tl, tu in zip(targets_local, targets_utc):
             lead_day = (tl.normalize() - t0_local).days + 1                       # 1 для D+1, 2 для D+2
             rec = {v: raw.at[tu, f"{v}_previous_day{lead_day}"] for v in config.WEATHER_VARS}
+            for m, d in ens.items():
+                for v in config.ENSEMBLE_VARS:
+                    col = f"{v}_previous_day{lead_day}"
+                    rec[f"{m}_{v}"] = d.at[tu, col] if tu in d.index and col in d else float("nan")
             rec.update(time=tu, target_local=tl, lead_day=lead_day)
             rows.append(rec)
         out = pd.DataFrame(rows)

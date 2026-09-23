@@ -9,12 +9,16 @@ from .data import utc_to_local
 
 R_DRY_AIR = 287.05  # Дж/(кг·К)
 
+ENSEMBLE_FEATURES = [f"{m}_{v}" for m in config.ENSEMBLE_MODELS for v in ("wind_speed_100m", "wind_speed_10m")] + [
+    "ens_mean_ws100", "ens_std_ws100", "ens_min_ws100", "ens_max_ws100",
+]
+
 FEATURES = [
     "wind_speed_10m", "wind_speed_80m", "wind_speed_100m", "wind_speed_120m", "wind_gusts_10m",
     "ws100_prev", "ws100_next", "ws100_cubed", "shear", "gust_ratio",
     "dir_sin", "dir_cos", "temperature_2m", "surface_pressure", "air_density",
     "hour_sin", "hour_cos", "doy_sin", "doy_cos", "lead_day", "turbine_id",
-]
+] + ENSEMBLE_FEATURES
 
 
 def make_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -43,4 +47,15 @@ def make_features(df: pd.DataFrame) -> pd.DataFrame:
     x["doy_sin"], x["doy_cos"] = np.sin(2 * np.pi * local.dayofyear / 365.25), np.cos(2 * np.pi * local.dayofyear / 365.25)
     x["lead_day"] = df["lead_day"].astype(int)
     x["turbine_id"] = df["turbine"].map({k: i for i, k in enumerate(config.TURBINES)}).astype(int) if "turbine" in df else 0
+    # ансамбль моделей погоды: если колонки модели нет (недоступна) — подставляем best_match, чтобы прогноз не падал
+    members = []
+    for m in config.ENSEMBLE_MODELS:
+        for v in ("wind_speed_100m", "wind_speed_10m"):
+            col = f"{m}_{v}"
+            x[col] = df[col].astype(float).fillna(df[v].astype(float)) if col in df else df[v].astype(float)
+        members.append(x[f"{m}_wind_speed_100m"])
+    members.append(ws)
+    ens = pd.concat(members, axis=1)
+    x["ens_mean_ws100"], x["ens_std_ws100"] = ens.mean(axis=1), ens.std(axis=1).fillna(0.0)
+    x["ens_min_ws100"], x["ens_max_ws100"] = ens.min(axis=1), ens.max(axis=1)
     return x[FEATURES]
