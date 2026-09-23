@@ -6,8 +6,10 @@ import pandas as pd
 
 from . import config
 from .data import utc_to_local
+from .terrain import directional_features
 
 R_DRY_AIR = 287.05  # Дж/(кг·К)
+MODEL_TERRAIN_FEATURES = ["terrain_upwind_slope", "terrain_local_slope"]
 
 ENSEMBLE_FEATURES = [f"{m}_{v}" for m in config.ENSEMBLE_MODELS for v in ("wind_speed_100m", "wind_speed_10m")] + [
     "ens_mean_ws100", "ens_std_ws100", "ens_min_ws100", "ens_max_ws100",
@@ -18,7 +20,10 @@ FEATURES = [
     "ws100_prev", "ws100_next", "ws100_cubed", "shear", "gust_ratio",
     "dir_sin", "dir_cos", "temperature_2m", "surface_pressure", "air_density",
     "hour_sin", "hour_cos", "doy_sin", "doy_cos", "lead_day", "turbine_id",
-] + ENSEMBLE_FEATURES
+] + ENSEMBLE_FEATURES + MODEL_TERRAIN_FEATURES
+# R1: на трёх ранних проверках лучшие MAE дали два уклона. Wake/land-cover
+# рассчитаны в directional_features для абляции и диагностики, но не включены
+# в итоговый бустинг (docs/research/R1_terrain.md).
 
 
 def make_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -60,4 +65,7 @@ def make_features(df: pd.DataFrame) -> pd.DataFrame:
     ens = pd.concat(members, axis=1)
     x["ens_mean_ws100"], x["ens_std_ws100"] = ens.mean(axis=1), ens.std(axis=1).fillna(0.0)
     x["ens_min_ws100"], x["ens_max_ws100"] = ens.min(axis=1), ens.max(axis=1)
+    # Только геометрия из локальных OSM/DEM; без SCADA и обращений к сети.
+    terrain = directional_features(df)
+    x[MODEL_TERRAIN_FEATURES] = terrain[MODEL_TERRAIN_FEATURES].to_numpy()
     return x[FEATURES]
