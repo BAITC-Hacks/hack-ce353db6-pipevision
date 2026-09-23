@@ -55,12 +55,16 @@ def main(argv: list[str] | None = None) -> int:
     else:
         from .agent.orchestrator import run_live, run_replay
         use_llm = not a.no_llm
-        if a.cmd == "replay":
-            run_replay(wx, a.start, a.end, use_llm=use_llm)
-        elif a.cmd == "forecast":
-            run_replay(wx, a.issue_date, a.issue_date, use_llm=use_llm)
+        if a.cmd in ("replay", "forecast"):
+            start, end = (a.start, a.end) if a.cmd == "replay" else (a.issue_date, a.issue_date)
+            summary = run_replay(wx, start, end, use_llm=use_llm)
+            n_err = int((summary["status"] == "error").sum()) if len(summary) else 0
+            if n_err:   # код выхода ≠ 0, чтобы автоматическая проверка заметила упавшие выпуски
+                logging.getLogger(__name__).error("выпусков с ошибкой: %d из %d", n_err, len(summary))
+                return 1
         elif a.cmd == "live":
-            run_live(wx, use_llm=use_llm)
+            if run_live(wx, use_llm=use_llm) is None:
+                return 1
     return 0
 
 

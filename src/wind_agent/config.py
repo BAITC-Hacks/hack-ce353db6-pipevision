@@ -1,9 +1,26 @@
 """Константы проекта: координаты, часовые пояса, горизонты, пути."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+
+def _detect_root() -> Path:
+    """Корень проекта (где лежат data/, models/, outputs/).
+
+    Порядок: переменная WIND_AGENT_ROOT → папка репозитория при установке `pip install -e .` →
+    текущая папка (при обычной установке в site-packages пакет лежит вне репозитория).
+    """
+    env = os.environ.get("WIND_AGENT_ROOT")
+    if env:
+        return Path(env).expanduser().resolve()
+    for cand in (Path(__file__).resolve().parents[2], Path.cwd()):
+        if (cand / "data" / "raw").is_dir():
+            return cand
+    return Path.cwd()
+
+
+ROOT = _detect_root()
 DATA_RAW = ROOT / "data" / "raw"
 CACHE_DIR = ROOT / "data" / "cache" / "openmeteo"
 MODELS_DIR = ROOT / "models"
