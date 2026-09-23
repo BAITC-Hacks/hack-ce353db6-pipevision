@@ -2,337 +2,78 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<!-- Карточка агента WindAgent: визуал «ядро агента» (canvas, при наличии — видео фоном), лента шагов, решение,
-     сообщение агента с эффектом печати. Данные подставляет ui/core.py:agent_card_html (JSON на месте метки). -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-:root{--bg0:#070c16;--bg1:#0c1424;--line:rgba(148,163,184,.16);--txt:#e5e9f0;--dim:#8b97a8;--teal:#2dd4bf;--cyan:#38bdf8;
-  --ok:#22c55e;--warn:#f59e0b;--err:#ef4444;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-*{box-sizing:border-box}
-html,body{margin:0;height:100%;background:transparent;color:var(--txt);
-  font-family:"Source Sans Pro","Source Sans 3",-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
-.card{position:relative;display:grid;grid-template-columns:35% 65%;height:100%;border-radius:12px;overflow:hidden;
-  background:radial-gradient(120% 140% at 0% 50%,#0d1b2e 0%,var(--bg0) 60%),var(--bg0);border:1px solid rgba(45,212,191,.28);
-  box-shadow:0 0 0 1px rgba(56,189,248,.06) inset,0 10px 40px -18px rgba(45,212,191,.35)}
-.card::after{content:"";position:absolute;inset:0;pointer-events:none;border-radius:12px;
-  background:linear-gradient(100deg,transparent 0%,rgba(45,212,191,.0) 40%,rgba(45,212,191,.10) 50%,transparent 60%);
-  background-size:250% 100%;background-position:120% 0;animation:sheen 9s ease-in-out 3s infinite}
-@keyframes sheen{0%{background-position:120% 0}30%,100%{background-position:-60% 0}}
-.viz{position:relative;overflow:hidden;border-right:1px solid var(--line)}
-.viz video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.55;filter:saturate(1.1)}
-.viz canvas{position:absolute;inset:0;width:100%;height:100%}
-.viz .tag{position:absolute;left:12px;bottom:10px;font:600 10px/1 var(--mono);letter-spacing:.14em;color:rgba(148,197,210,.75)}
-.viz .tag b{color:var(--teal)}
-.panel{display:flex;flex-direction:column;min-width:0;padding:12px 16px 10px 16px}
-.hdr{display:flex;align-items:center;gap:10px;min-width:0}
-.dot{width:9px;height:9px;border-radius:50%;background:var(--teal);box-shadow:0 0 0 0 rgba(45,212,191,.6);flex:none}
-.dot.live{animation:pulse 1.6s ease-out infinite}
-@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(45,212,191,.55)}100%{box-shadow:0 0 0 10px rgba(45,212,191,0)}}
-.name{font-weight:700;font-size:17px;letter-spacing:.01em;white-space:nowrap}
-.name span{background:linear-gradient(90deg,#e6fffb,#7dd3fc);-webkit-background-clip:text;background-clip:text;color:transparent}
-.status{font:600 11px/1 var(--mono);letter-spacing:.08em;color:var(--teal);text-transform:uppercase;white-space:nowrap}
-.engine{margin-left:auto;font:600 11px/1 var(--mono);padding:4px 8px;border-radius:999px;border:1px solid rgba(125,211,252,.35);
-  color:#bae6fd;background:rgba(56,189,248,.08);white-space:nowrap}
-.subj{font-size:12.5px;color:var(--dim);margin:4px 0 8px 19px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.body{flex:1;display:grid;grid-template-columns:minmax(0,44%) minmax(0,56%);gap:14px;min-height:0}
-.feed{display:flex;flex-direction:column;gap:3px;overflow:hidden;min-height:0}
-.step{display:grid;grid-template-columns:16px auto 1fr auto;align-items:center;gap:7px;padding:3px 6px;border-radius:6px;
-  font-size:12px;line-height:1.25;opacity:0;transform:translateX(-8px);transition:opacity .35s ease,transform .35s ease,background .6s}
-.step.on{opacity:1;transform:none}
-.step.run{background:rgba(45,212,191,.09)}
-.step .ic{width:14px;height:14px;border-radius:50%;border:2px solid rgba(45,212,191,.35);border-top-color:var(--teal)}
-.step.run .ic{animation:spin .7s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-.step.done .ic{border:none;background:var(--ok);position:relative}
-.step.done .ic::after{content:"";position:absolute;left:4.5px;top:2px;width:3.5px;height:7px;border:solid #06120c;border-width:0 2px 2px 0;transform:rotate(45deg)}
-.step.done.warning .ic{background:var(--warn)}
-.step.done.error .ic{background:var(--err)}
-.step.done.skip .ic{background:#475569}
-.step code{font:600 11.5px/1 var(--mono);color:#a5f3fc;white-space:nowrap}
-.step .sum{color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
-.step .ms{font:11px/1 var(--mono);color:#94a3b8;font-variant-numeric:tabular-nums;opacity:0;transition:opacity .3s}
-.step.done .ms{opacity:1}
-.step .llm{font:700 9px/1 var(--mono);color:#c4b5fd;margin-left:4px}
-.out{display:flex;flex-direction:column;gap:8px;min-height:0}
-.dec{display:flex;align-items:center;gap:12px;opacity:0;transform:scale(.96);transition:opacity .45s ease,transform .45s cubic-bezier(.2,1.4,.4,1)}
-.dec.on{opacity:1;transform:none}
-.word{font:800 26px/1 var(--mono);letter-spacing:.06em;padding:6px 12px;border-radius:8px;border:1px solid currentColor;
-  text-shadow:0 0 18px currentColor}
-.word.accept{color:var(--ok);background:rgba(34,197,94,.08)}
-.word.flag{color:var(--warn);background:rgba(245,158,11,.08)}
-.word.recalculate{color:var(--err);background:rgba(239,68,68,.08)}
-.word.idle{color:var(--cyan);background:rgba(56,189,248,.08)}
-.step.on.pending{opacity:.55}
-.step.pending .ic{border-color:rgba(100,116,139,.6);border-style:dashed}
-.dmeta{display:flex;flex-direction:column;gap:3px;min-width:0}
-.dru{font-size:13px;font-weight:600}
-.chk{font:11px/1.2 var(--mono);color:var(--dim)}
-.chk.bad{color:var(--warn)}
-.msg{flex:1;display:flex;gap:9px;min-height:0;opacity:0;transition:opacity .4s}
-.msg.on{opacity:1}
-.av{flex:none;width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font:800 10px/1 var(--mono);color:#042f2e;
-  background:conic-gradient(from 200deg,#2dd4bf,#38bdf8,#a78bfa,#2dd4bf)}
-.bubble{flex:1;min-height:0;overflow:auto;padding:8px 11px;border-radius:4px 12px 12px 12px;background:rgba(15,28,46,.85);
-  border:1px solid rgba(56,189,248,.18);font-size:13.2px;line-height:1.5;color:#dbe4ee;white-space:pre-wrap;scrollbar-width:thin;cursor:default}
-.caret{display:inline-block;width:7px;height:14px;margin-left:1px;vertical-align:-2px;background:var(--teal);animation:blink .9s steps(1) infinite}
-.caret.off{display:none}
-@keyframes blink{50%{opacity:0}}
-.foot{font:10.5px/1 var(--mono);color:#64748b;margin-top:6px;display:flex;gap:14px}
-/* эффект запуска */
-.card.intro{animation:boot 1.1s cubic-bezier(.2,.8,.2,1) both}
-.card.intro .panel{animation:fadeup .8s ease .55s both}
-@keyframes boot{0%{clip-path:inset(0 50% 0 50% round 12px);filter:brightness(2.2) blur(2px)}
-  55%{clip-path:inset(0 0 0 0 round 12px);filter:brightness(1.4)}100%{clip-path:inset(0 0 0 0 round 12px);filter:none}}
-@keyframes fadeup{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-.scan{position:absolute;left:0;right:0;height:2px;top:0;pointer-events:none;opacity:0;
-  background:linear-gradient(90deg,transparent,rgba(45,212,191,.9),transparent);box-shadow:0 0 18px rgba(45,212,191,.8)}
-.card.intro .scan{animation:scan 1.6s ease .2s 1 both}
-@keyframes scan{0%{top:0;opacity:0}10%{opacity:1}100%{top:100%;opacity:0}}
-@media (max-width:900px){.card{grid-template-columns:30% 70%}.panel{padding:10px 12px 8px}
-  .body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr);gap:6px}
-  .feed{gap:1px}.step{padding:1px 5px;font-size:11.5px}.word{font-size:20px;padding:4px 9px}.foot{display:none}
-  .out{flex-direction:column;gap:6px}.bubble{font-size:12.5px}}
-@media (max-width:560px){.card{grid-template-columns:1fr}.viz{display:none}.body{overflow:auto}}
-@media (prefers-reduced-motion:reduce){.card.intro,.card.intro .panel,.card::after{animation:none}}
+:root{color-scheme:light dark;--text:#1e293b;--muted:#526174;--line:#d3dbe5;--panel:#f8fafc;--ok:#087f6b;--warn:#9a5a00;--error:#b42338;--accent:#5c47b6}
+@media(prefers-color-scheme:dark){:root{--text:#e2e8f0;--muted:#a2afc0;--line:#364252;--panel:#141c28;--ok:#6ad9c5;--warn:#efc36b;--error:#ff91a2;--accent:#b7a5ff}}
+:root[data-theme="dark"]{color-scheme:dark;--text:#e2e8f0;--muted:#a2afc0;--line:#364252;--panel:#141c28;--ok:#6ad9c5;--warn:#efc36b;--error:#ff91a2;--accent:#b7a5ff}
+:root[data-theme="light"]{color-scheme:light;--text:#1e293b;--muted:#526174;--line:#d3dbe5;--panel:#f8fafc;--ok:#087f6b;--warn:#9a5a00;--error:#b42338;--accent:#5c47b6}
+*{box-sizing:border-box}html,body{margin:0;background:transparent;color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.strip{height:88px;position:relative;padding:11px 14px;border:1px solid var(--line);border-radius:12px;background:var(--panel);overflow:hidden}
+.header{display:flex;align-items:center;gap:12px;min-width:0;line-height:18px;font-size:12px}.name{font-weight:650;white-space:nowrap}.status{margin-left:auto;color:var(--muted);text-align:right;white-space:nowrap}.status[data-state="warning"]{color:var(--warn)}.status[data-state="error"]{color:var(--error)}
+.stages{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));list-style:none;margin:12px 0 0;padding:0;gap:16px}.stage{position:relative;display:flex;align-items:center;gap:6px;min-width:0;color:var(--muted);font-size:12px;line-height:20px}.stage:not(:last-child)::after{content:"";width:8px;height:8px;border-top:1px solid var(--line);border-right:1px solid var(--line);position:absolute;right:-9px;top:6px;transform:rotate(45deg)}
+.mark{display:inline-flex;align-items:center;justify-content:center;flex:0 0 18px;width:18px;height:18px;border:1px solid currentColor;border-radius:50%;font-size:12px;font-weight:650;line-height:1}.stage[data-state="ok"] .mark{color:var(--ok)}.stage[data-state="warning"] .mark{color:var(--warn)}.stage[data-state="error"] .mark{color:var(--error)}.stage[data-state="running"] .mark{color:var(--accent)}.stage[data-state="pending"] .mark,.stage[data-state="skip"] .mark{border-style:dashed}.label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sr-only{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+/* One completion acknowledgement; every stage is already shown in its real final state. */
+.strip.ack::after{content:"";position:absolute;pointer-events:none;inset:0;background:linear-gradient(100deg,transparent 25%,color-mix(in srgb,var(--ok) 12%,transparent) 50%,transparent 75%);transform:translateX(-110%);animation:wa-ack 1.05s ease-out 1 both}
+@keyframes wa-ack{0%{transform:translateX(-110%);opacity:0}15%{opacity:1}100%{transform:translateX(110%);opacity:0}}
+@media(max-width:420px){.strip{padding:10px 12px;height:108px}.header{gap:6px;font-size:11px}.stages{grid-template-columns:repeat(2,minmax(0,1fr));margin-top:9px;gap:7px 20px}.stage{font-size:12px;gap:7px}.stage:not(:last-child)::after{display:none}.stage:nth-child(odd)::after{display:block;right:-8px;width:6px;height:6px;top:7px}.mark{width:18px;height:18px;flex-basis:18px}}
+@media(prefers-reduced-motion:reduce){.strip.ack::after{animation:none;display:none}}
 </style>
 </head>
 <body>
-<div class="card" id="card">
-  <div class="viz" id="viz"><canvas id="cv"></canvas><div class="tag">WINDAGENT · <b id="vtag">CORE</b></div></div>
-  <div class="panel">
-    <div class="hdr"><span class="dot" id="dot"></span><span class="name"><span>Агент WindAgent</span></span>
-      <span class="status" id="status">на связи</span><span class="engine" id="engine"></span></div>
-    <div class="subj" id="subj"></div>
-    <div class="body">
-      <div class="feed" id="feed"></div>
-      <div class="out">
-        <div class="dec" id="dec"><span class="word" id="word"></span><div class="dmeta"><span class="dru" id="dru"></span>
-          <span class="chk" id="chk"></span></div></div>
-        <div class="msg" id="msg"><span class="av">WA</span><div class="bubble" id="bubble"><span id="txt"></span><span class="caret" id="caret"></span></div></div>
-      </div>
-    </div>
-    <div class="foot" id="foot"></div>
-  </div>
-  <div class="scan"></div>
-</div>
+<section class="strip" id="strip" aria-label="Ход расчёта WindAgent">
+  <div class="header"><span class="name">Агент WindAgent</span><span class="status" id="status" role="status">Ожидает расчёта</span></div>
+  <ol class="stages" id="stages"></ol>
+</section>
 <script>
 (function () {
+  'use strict';
   var D = /*__WA_CARD_DATA__*/null;
-  if (!D) return;
-  var $ = function (id) { return document.getElementById(id); };
-  var steps = D.steps || [], orbit = D.orbit || [];
-  var store = null;
-  try { store = window.sessionStorage; } catch (e) { store = null; }
-  var seen = false;
-  try { seen = !!(store && store.getItem("wa-card-" + D.key)); } catch (e) { seen = false; }
-  var animate = !!D.animate && !seen;
-  try { if (animate && store) store.setItem("wa-card-" + D.key, "1"); } catch (e) {}
-  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  if (reduce) animate = false;
-
-  // ---------- статический текст
-  $("engine").textContent = D.engine || "";
-  $("subj").textContent = D.subject || "";
-  $("vtag").textContent = D.mode === "study" ? "SITE SURVEY" : "FORECAST CYCLE";
-  var dec = D.decision || {};
-  $("word").textContent = dec.word || "—";
-  $("word").className = "word " + (dec.code || "");
-  $("dru").textContent = dec.ru || "";
-  $("chk").textContent = D.check || "";
-  if (D.check_bad) $("chk").className = "chk bad";
-  var foot = [];
-  if (D.total_ms) foot.push("цикл " + (D.total_ms >= 1000 ? (D.total_ms / 1000).toFixed(1) + " с" : D.total_ms + " мс"));
-  foot.push("шагов " + steps.length);
-  if (dec.rules && dec.rules !== dec.code) foot.push("по правилам: " + dec.rules);
-  $("foot").textContent = foot.join("  ·  ");
-
-  // ---------- видео фоном (если оркестратор положил ui/assets/agent_intro.*)
-  if (D.video) {
-    var v = document.createElement("video");
-    v.src = D.video; v.autoplay = true; v.muted = true; v.loop = true; v.playsInline = true;
-    v.setAttribute("muted", ""); v.setAttribute("playsinline", "");
-    $("viz").insertBefore(v, $("cv"));
-    try { v.play(); } catch (e) {}
+  D = D || {};
+  if (D.theme === 'light' || D.theme === 'dark') document.documentElement.dataset.theme = D.theme;
+  var groups = D.mode === 'study' ? [
+    ['Атлас', ['атлас']], ['Ресурс', ['ERA5']], ['Прогноз', ['прогноз']], ['Проверка', ['рельеф', 'отчёт']]
+  ] : [
+    ['Погода', ['fetch_weather']], ['Данные', ['prepare_data', 'recalculate']],
+    ['Прогноз', ['run_model']], ['Проверка', ['analyze_forecast', 'llm', 'verify_narrative', 'write_report']]
+  ];
+  var aliases = {done:'ok',success:'ok',completed:'ok',skipped:'skip',run:'running',failed:'error',warn:'warning'};
+  var labels = {ok:'готово',pending:'ожидает',skip:'пропущено',running:'в работе',warning:'есть ограничения',error:'ошибка'};
+  var marks = {ok:'✓',pending:'·',skip:'−',running:'…',warning:'!',error:'×'};
+  var latest = {};
+  (D.steps || []).forEach(function(s) { latest[s.tool] = aliases[s.status] || s.status || 'pending'; });
+  function stageState(tools) {
+    var values = tools.filter(function(t) {return Object.prototype.hasOwnProperty.call(latest,t);}).map(function(t){return latest[t];});
+    if (!values.length) return 'pending';
+    for (var i=0;i<5;i++) {var state=['error','running','warning','pending','skip'][i]; if(values.indexOf(state)>=0)return state;}
+    return values.every(function(s){return s==='ok';}) ? 'ok' : 'pending';
   }
-
-  // ---------- лента шагов
-  var feed = $("feed"), rows = [];
-  steps.forEach(function (s) {
-    var r = document.createElement("div");
-    r.className = "step";
-    r.title = (s.label || "") + (s.summary ? " — " + s.summary : "");
-    var ms = s.ms >= 1000 ? (s.ms / 1000).toFixed(1) + " с" : s.ms + " мс";
-    r.innerHTML = '<span class="ic"></span><code></code><span class="sum"></span><span class="ms"></span>';
-    r.children[1].textContent = s.tool;
-    if (s.llm) { var b = document.createElement("span"); b.className = "llm"; b.textContent = "LLM"; r.children[1].appendChild(b); }
-    r.children[2].textContent = s.summary || s.label || "";
-    r.children[3].textContent = s.status === "skip" ? "—" : s.status === "pending" ? "" : ms;
-    feed.appendChild(r); rows.push(r);
+  var states = [];
+  groups.forEach(function(group){
+    var state = stageState(group[1]); states.push(state);
+    var item = document.createElement('li'); item.className='stage'; item.dataset.state=state;
+    var mark = document.createElement('span'); mark.className='mark'; mark.setAttribute('aria-hidden','true'); mark.textContent=marks[state];
+    var label = document.createElement('span'); label.className='label'; label.textContent=group[0];
+    var sr = document.createElement('span'); sr.className='sr-only'; sr.textContent=': '+labels[state];
+    item.title=group[0]+': '+labels[state]; item.appendChild(mark);item.appendChild(label);item.appendChild(sr);
+    document.getElementById('stages').appendChild(item);
   });
-  var state = { active: -1, done: {}, finished: false };
-  function orbitIndex(i) {
-    var s = steps[i]; if (!s) return -1;
-    var k = orbit.indexOf(s.tool);
-    return k;
+  var decision = (D.decision || {}).code || 'idle';
+  var severity = states.indexOf('error')>=0 || ['error','recalculate'].indexOf(decision)>=0 ? 'error' :
+    states.indexOf('running')>=0 ? 'running' :
+    states.some(function(s){return ['warning','skip'].indexOf(s)>=0;}) || ['warning','flag'].indexOf(decision)>=0 ? 'warning' :
+    states.indexOf('pending')>=0 ? 'pending' : 'ready';
+  var text = {ready:'Расчёт готов',warning:'Есть ограничения',error:'Нужна проверка',running:'Идёт расчёт',pending:'Ожидает расчёта'};
+  var status = document.getElementById('status'); status.dataset.state=severity;status.textContent=text[severity];
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var key = D.key ? 'wa-card-'+D.key : null, seen = false;
+  try {seen=!!(key && window.sessionStorage.getItem(key));} catch(e) {seen=true;}
+  // Never animate initial rendering, incomplete runs, unknown keys or a rerender of the same action.
+  if (D.animate === true && key && !seen && !reduce && severity !== 'pending' && severity !== 'running') {
+    try {window.sessionStorage.setItem(key,'1');} catch(e) {return;}
+    document.getElementById('strip').classList.add('ack');
   }
-  function finishRow(i) {
-    var s = steps[i], r = rows[i];
-    if (s.status === "pending") { r.className = "step on pending"; return; }
-    r.className = "step on done " + (s.status || "ok");
-    var k = orbitIndex(i); if (k >= 0) state.done[k] = s.status || "ok";
-  }
-
-  // ---------- печать сообщения
-  var msg = String(D.message || ""), txt = $("txt"), caret = $("caret"), typing = null;
-  function doneWord() { return dec.code === "idle" ? "на связи" : D.mode === "study" ? "исследование завершено" : "цикл завершён"; }
-  function showAll() {
-    rows.forEach(function (r, i) { finishRow(i); });
-    $("dec").className = "dec on"; $("msg").className = "msg on";
-    txt.textContent = msg; caret.className = "caret off";
-    $("status").textContent = doneWord();
-    $("dot").className = "dot"; state.active = -1; state.finished = true;
-  }
-  function typeMessage() {
-    $("msg").className = "msg on";
-    var i = 0, per = Math.max(1, Math.round(msg.length / 260)), bubble = $("bubble");
-    $("status").textContent = "формулирует вывод";
-    function tick() {
-      if (document.hidden) { typing = requestAnimationFrame(tick); return; }
-      i = Math.min(msg.length, i + per);
-      txt.textContent = msg.slice(0, i);
-      bubble.scrollTop = bubble.scrollHeight;
-      if (i < msg.length) { typing = requestAnimationFrame(tick); }
-      else { caret.className = "caret off"; $("status").textContent = doneWord();
-             $("dot").className = "dot"; state.finished = true; }
-    }
-    typing = requestAnimationFrame(tick);
-  }
-  $("bubble").addEventListener("click", function () { if (typing) cancelAnimationFrame(typing); showAll(); });
-
-  if (!animate) {
-    showAll();
-  } else {
-    if (D.intro) $("card").className = "card intro";
-    $("dot").className = "dot live";
-    $("status").textContent = dec.code === "idle" ? "оценивает кандидата" : D.mode === "study" ? "исследует площадку" : "выполняет цикл";
-    var t = D.intro ? 1150 : 250, gap = Math.max(260, Math.min(480, 2600 / Math.max(1, steps.length)));
-    steps.forEach(function (s, i) {
-      setTimeout(function () { rows[i].className = "step on run"; state.active = orbitIndex(i); }, t + i * gap);
-      setTimeout(function () { finishRow(i); }, t + i * gap + gap * 0.8);
-    });
-    var tEnd = t + steps.length * gap + 120;
-    setTimeout(function () { state.active = -1; $("dec").className = "dec on"; }, tEnd);
-    setTimeout(typeMessage, tEnd + 450);
-  }
-
-  // ---------- canvas: поток ветра → ротор-ядро с орбитой инструментов
-  var cv = $("cv"), ctx = cv.getContext("2d"), W = 0, H = 0, dpr = Math.min(2, window.devicePixelRatio || 1);
-  function resize() {
-    var r = cv.getBoundingClientRect(); W = Math.max(10, r.width); H = Math.max(10, r.height);
-    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  }
-  resize(); window.addEventListener("resize", resize);
-  var P = [], N = 150;
-  function spawn(p, fresh) {
-    p.x = fresh ? Math.random() * W : -10 - Math.random() * 40;
-    p.y = Math.random() * H; p.v = 0.6 + Math.random() * 1.3; p.s = Math.random() * 6.28; p.a = 0.25 + Math.random() * 0.6;
-    p.life = 0; return p;
-  }
-  for (var i = 0; i < N; i++) P.push(spawn({}, true));
-  var t0 = performance.now(), last = t0, running = true, raf = null, spin = 0, boot = animate && D.intro ? 0 : 1;
-  var green = "34,197,94", amber = "245,158,11", red = "239,68,68", teal = "45,212,191";
-  function col(st) { return st === "warning" ? amber : st === "error" ? red : st === "skip" ? "100,116,139" : teal; }
-  function frame(now) {
-    if (!running) return;
-    var dt = Math.min(50, now - last); last = now;
-    var tt = (now - t0) / 1000;
-    boot = Math.min(1, boot + dt / 1400);
-    var cx = W * 0.54, cy = H * 0.5, R0 = Math.min(W, H) * 0.12, busy = state.active >= 0 || !state.finished;
-    ctx.clearRect(0, 0, W, H);
-    if (!D.video) {                                   // тонкая сетка диспетчерского экрана
-      ctx.strokeStyle = "rgba(148,163,184,0.05)"; ctx.lineWidth = 1; ctx.beginPath();
-      for (var gx = 0; gx < W; gx += 24) { ctx.moveTo(gx, 0); ctx.lineTo(gx, H); }
-      for (var gy = 0; gy < H; gy += 24) { ctx.moveTo(0, gy); ctx.lineTo(W, gy); }
-      ctx.stroke();
-    }
-    // частицы ветра: поток слева, стягивание к ядру
-    ctx.globalCompositeOperation = "lighter";
-    var pull = busy ? 1.0 : 0.6;
-    for (var k = 0; k < P.length; k++) {
-      var p = P[k], dx = cx - p.x, dy = cy - p.y, d = Math.sqrt(dx * dx + dy * dy) + 1e-3;
-      var vx = p.v * 1.6, vy = Math.sin(p.x * 0.018 + tt * 0.9 + p.s) * 0.45;
-      var g = pull * Math.min(1.6, 90 / d) * 0.9;
-      vx += dx / d * g; vy += dy / d * g;
-      var tx = -dy / d, ty = dx / d, sw = Math.min(2.2, 60 / d);    // закрутка у ротора
-      vx += tx * sw; vy += ty * sw;
-      var ox = p.x, oy = p.y, f = dt / 16.7;
-      p.x += vx * f; p.y += vy * f; p.life += dt;
-      if (d < R0 * 0.55 || p.x > W + 10 || p.y < -10 || p.y > H + 10) { spawn(p, false); continue; }
-      var al = p.a * Math.min(1, p.life / 400) * boot;
-      ctx.strokeStyle = "rgba(" + (d < R0 * 2.4 ? "125,211,252" : teal) + "," + al.toFixed(3) + ")";
-      ctx.lineWidth = 1.1; ctx.beginPath(); ctx.moveTo(ox - vx * 2.2 * f, oy - vy * 2.2 * f); ctx.lineTo(p.x, p.y); ctx.stroke();
-    }
-    ctx.globalCompositeOperation = "source-over";
-    // орбита инструментов (эллипс с наклоном), задняя половина — до ядра
-    var rx = R0 * 2.55, ry = R0 * 0.95, n = orbit.length, rot = tt * 0.18;
-    function node(j) { var an = rot + j * 6.2832 / n; return { x: cx + Math.cos(an) * rx, y: cy + Math.sin(an) * ry, z: Math.sin(an), an: an }; }
-    ctx.strokeStyle = "rgba(45,212,191," + (0.22 * boot).toFixed(3) + ")"; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.ellipse(cx, cy, rx, ry, 0, 0, 6.2832); ctx.stroke();
-    ctx.setLineDash([2, 5]); ctx.strokeStyle = "rgba(56,189,248," + (0.18 * boot).toFixed(3) + ")";
-    ctx.beginPath(); ctx.ellipse(cx, cy, rx * 1.28, ry * 1.32, 0, 0, 6.2832); ctx.stroke(); ctx.setLineDash([]);
-    function drawNode(j) {
-      var q = node(j), st = state.done[j], act = state.active === j;
-      var rgb = act ? "255,255,255" : st ? col(st) : "100,116,139", sz = (act ? 6 : 4.2) * (0.8 + 0.2 * (q.z + 1));
-      if (act) {                                        // луч от ядра к активному инструменту
-        var gr = ctx.createLinearGradient(cx, cy, q.x, q.y);
-        gr.addColorStop(0, "rgba(45,212,191,0.0)"); gr.addColorStop(1, "rgba(45,212,191,0.9)");
-        ctx.strokeStyle = gr; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(q.x, q.y); ctx.stroke();
-        ctx.fillStyle = "rgba(45,212,191,0.25)"; ctx.beginPath(); ctx.arc(q.x, q.y, sz * 2.6, 0, 6.2832); ctx.fill();
-      }
-      ctx.fillStyle = "rgba(" + rgb + "," + ((q.z < 0 ? 0.55 : 1) * boot).toFixed(3) + ")";
-      ctx.beginPath(); ctx.arc(q.x, q.y, sz, 0, 6.2832); ctx.fill();
-      if (q.z > -0.2 || act) {
-        ctx.font = (act ? "600 " : "") + "10px ui-monospace,Menlo,monospace";
-        ctx.fillStyle = "rgba(" + (act ? "236,254,255" : "148,163,184") + "," + ((act ? 1 : 0.75) * boot).toFixed(3) + ")";
-        ctx.textAlign = q.x < cx ? "right" : "left";
-        ctx.fillText(orbit[j], q.x + (q.x < cx ? -9 : 9), q.y + 3.5);
-      }
-    }
-    for (var j = 0; j < n; j++) if (node(j).z < 0) drawNode(j);
-    // волна-радар от ядра
-    var ph = (tt % 2.6) / 2.6;
-    ctx.strokeStyle = "rgba(45,212,191," + ((1 - ph) * 0.35 * boot).toFixed(3) + ")"; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.arc(cx, cy, R0 * (1 + ph * 2.4), 0, 6.2832); ctx.stroke();
-    // ядро: свечение + ротор
-    var pulse = 0.5 + 0.5 * Math.sin(tt * (busy ? 5 : 2.2));
-    var glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, R0 * 2.1);
-    glow.addColorStop(0, "rgba(94,234,212," + ((0.55 + 0.25 * pulse) * boot).toFixed(3) + ")");
-    glow.addColorStop(0.35, "rgba(45,212,191," + (0.18 * boot).toFixed(3) + ")"); glow.addColorStop(1, "rgba(45,212,191,0)");
-    ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(cx, cy, R0 * 2.1, 0, 6.2832); ctx.fill();
-    spin += dt / 1000 * (busy ? 3.4 : 1.4);
-    ctx.save(); ctx.translate(cx, cy); ctx.rotate(spin);
-    for (var b = 0; b < 3; b++) {
-      ctx.rotate(2.0944);
-      var L = R0 * 1.55 * boot;
-      var bg = ctx.createLinearGradient(0, 0, 0, -L);
-      bg.addColorStop(0, "rgba(236,254,255,0.95)"); bg.addColorStop(1, "rgba(125,211,252,0.25)");
-      ctx.fillStyle = bg; ctx.beginPath(); ctx.moveTo(-R0 * 0.12, 0);
-      ctx.quadraticCurveTo(-R0 * 0.2, -L * 0.45, -R0 * 0.03, -L); ctx.lineTo(R0 * 0.05, -L);
-      ctx.quadraticCurveTo(R0 * 0.1, -L * 0.4, R0 * 0.12, 0); ctx.closePath(); ctx.fill();
-    }
-    ctx.restore();
-    ctx.fillStyle = "#0b1626"; ctx.strokeStyle = "rgba(94,234,212,0.9)"; ctx.lineWidth = 1.6;
-    ctx.beginPath(); ctx.arc(cx, cy, R0 * 0.3, 0, 6.2832); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = "rgba(94,234,212," + (0.6 + 0.4 * pulse).toFixed(3) + ")";
-    ctx.beginPath(); ctx.arc(cx, cy, R0 * 0.12, 0, 6.2832); ctx.fill();
-    for (var j2 = 0; j2 < n; j2++) if (node(j2).z >= 0) drawNode(j2);
-    raf = requestAnimationFrame(frame);
-  }
-  function start() { if (!running) { running = true; last = performance.now(); raf = requestAnimationFrame(frame); } }
-  function stop() { running = false; if (raf) cancelAnimationFrame(raf); raf = null; }
-  document.addEventListener("visibilitychange", function () { document.hidden ? stop() : start(); });
-  if (reduce) { running = true; frame(performance.now()); stop(); }
-  else raf = requestAnimationFrame(frame);
-})();
+}());
 </script>
 </body>
 </html>

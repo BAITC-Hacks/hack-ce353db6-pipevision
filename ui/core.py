@@ -55,10 +55,11 @@ UI_OUT_DIR = Path(os.environ.get("WIND_AGENT_UI_OUT") or config.OUTPUTS_DIR / "t
 
 TRANSFER_WARNING = ("Перенос модели ВЭС «Нурлы»: истории этой площадки нет, кривая мощности обобщённая, ошибка выше; "
                     "для точного прогноза загрузите SCADA")
-DECISION_RU = {"accept": "принять прогноз", "flag": "принять с флагом для диспетчера",
+DECISION_RU = {"accept": "автопроверки пройдены", "flag": "нужна проверка диспетчера",
                "recalculate": "пересчитать (повторный запрос входа)"}
 
 _RUN_LOCK = threading.Lock()                    # один прогон за раз: подмена каталога записи — глобальная для процесса
+_LOADED_MODEL_SHA: str | None = None
 
 
 # ---------------------------------------------------------------- параметры и результат
@@ -170,14 +171,30 @@ def llm_model_name() -> str:
     return os.getenv("OPENAI_MODEL") or getattr(llm, "DEFAULT_MODEL", "")
 
 
-def load_core() -> dict:
-    """Прогреть модель и климатологию SCADA (оба кэшируются в процессе; в UI — ещё и st.cache_resource)."""
+def _current_model() -> tuple:
+    """Вызывать под _RUN_LOCK: смена файла модели инвалидирует кэш ядра, даже если UI уже прогрет."""
+    import hashlib
+
+    global _LOADED_MODEL_SHA
+    digest = hashlib.sha256((config.MODELS_DIR / "power_model.joblib").read_bytes()).hexdigest()
+    if digest != _LOADED_MODEL_SHA:
+        clear = getattr(tools.load_model, "cache_clear", None)
+        if clear:
+            clear()
     model = tools.load_model()
+    _LOADED_MODEL_SHA = digest
+    return model, digest
+
+
+def load_core() -> dict:
+    """Прогреть текущую модель и климатологию SCADA; при замене артефакта кэш модели обновляется."""
+    with _RUN_LOCK:
+        model, digest = _current_model()
     try:
         tools.load_history()
     except Exception:  # noqa: BLE001 — климатология нужна анализу, но прогрев необязателен
         pass
-    return {"model": model, "model_version": tools.model_version(model)}
+    return {"model": model, "model_version": tools.model_version(model), "model_sha256": digest}
 
 
 def nurly_site() -> "SiteInfo":
@@ -351,6 +368,7 @@ def run_forecast(params: ForecastParams, wx: WeatherClient | None = None, progre
         redirect = _redirect_outputs(out_dir)
 
     with _RUN_LOCK, _capture_core_log(progress) as core_log, redirect:
+        _, model_digest = _current_model()
         calls0 = wx.calls
         session = orchestrator.run_cycle(wx, llm_state, **kwargs)
         api_calls = int(wx.calls - calls0)
@@ -372,7 +390,8 @@ def run_forecast(params: ForecastParams, wx: WeatherClient | None = None, progre
 
     return ForecastResult(
         params=params, site=site, forecast=session.state["forecast"].copy(), analysis=session.state["analysis"],
-        final=dict(session.final), trace=list(session.trace), meta=dict(session.state.get("weather", {}).get("meta", {})),
+        final=dict(session.final), trace=list(session.trace),
+        meta=dict(session.state.get("weather", {}).get("meta", {}), model_sha256=model_digest),
         report_md=report_md, notices=notices, core_log=list(core_log), previous_issue=previous_issue, previous=previous,
         ens_std=ens_std,
         api_calls=api_calls, elapsed_s=round(time.perf_counter() - t0, 2))
@@ -383,7 +402,7 @@ def run_forecast(params: ForecastParams, wx: WeatherClient | None = None, progre
 def _core_site(res: "ForecastResult"):
     """config.Site площадки результата: «Нурлы» или своя площадка по параметрам прогона."""
     p = res.params
-    if p.site == CUSTOM_KEY and hasattr(config, "custom_site"):
+    if res.site.custom_applied and p.site == CUSTOM_KEY and hasattr(config, "custom_site"):
         return config.custom_site(p.lat, p.lon, n_turbines=int(p.n_turbines), rated_mw=float(p.rated_mw),
                                   name=p.name.strip() or None)
     return getattr(config, "NURLY", None)
@@ -396,7 +415,7 @@ def horizon_analysis(res: "ForecastResult", horizon: int | None = None) -> dict:
     h = int(horizon or res.params.horizon)
     full = int(res.forecast["lead_hours"].max()) if len(res.forecast) else h
     if h >= full:
-        return res.analysis
+        return {**res.analysis, "horizon_hours": h}
     if h in res.horizon_cache:
         return res.horizon_cache[h]
     a0 = res.analysis
@@ -405,7 +424,13 @@ def horizon_analysis(res: "ForecastResult", horizon: int | None = None) -> dict:
         notes = [f["message"] for f in a0.get("flags", []) if f.get("code") == "input_quality"]
         info = [f["message"] for f in a0.get("flags", []) if f.get("code") == "ensemble_gap"]
         site = _core_site(res)
-        history = tools.load_history() if getattr(site, "has_history", not res.site.transfer) else None
+        # Отсутствие SCADA не должно возвращать показатели полного выпуска в представление 24 ч.
+        history = {"by_month": {}, "range": None}
+        if getattr(site, "has_history", not res.site.transfer):
+            try:
+                history = tools.load_history()
+            except Exception:  # noqa: BLE001 — климатология необязательна для расчёта показателей
+                pass
         kw = {"site": site} if site is not None and "site" in _kw_names(tools.analyze_forecast) else {}
         a = tools.analyze_forecast(fc, res.previous, history, notes=notes, info=info, **kw)
         a["checks"] = dict(a.get("checks") or {}, complete=(a0.get("checks") or {}).get("complete", True))
@@ -413,8 +438,11 @@ def horizon_analysis(res: "ForecastResult", horizon: int | None = None) -> dict:
                       or any(g.get("code") == "incomplete" for g in a0.get("flags", []))]
         a["status"] = "warning" if any(f.get("level") == "warning" for f in a["flags"]) else "ok"
         a["horizon_hours"] = h
-    except Exception:  # noqa: BLE001 — без пересчёта остаётся анализ агента
-        a = a0
+    except Exception:  # noqa: BLE001 — не подменяем выбранный период полным выпуском
+        a = {"metrics": {}, "revision": None, "days": [], "series": res.series,
+             "checks": {"complete": False}, "status": "warning", "horizon_hours": h,
+             "flags": [{"code": "analysis_unavailable", "level": "warning",
+                        "message": "Проверки выбранного периода недоступны; требуется повторный расчёт."}]}
     res.horizon_cache[h] = a
     return a
 
@@ -439,7 +467,7 @@ def series_stats(view: pd.DataFrame, series: str) -> dict:
 
 
 def daily_table(view: pd.DataFrame, series: list[str], label, scale=None, unit: str = "ч.н.") -> pd.DataFrame:
-    """Энергия по местным суткам: «P50 [P10–P90]» для каждого ряда + строка «Итого». scale(series) → множитель."""
+    """Энергия по местным суткам: P50 и суммы почасовых границ (не калиброванный интервал энергии)."""
     v = view.assign(day=view["time_local"].dt.strftime("%Y-%m-%d"))
     days = sorted(v["day"].unique())
     hours = v[v["turbine"] == series[0]].groupby("day").size()
@@ -451,7 +479,7 @@ def daily_table(view: pd.DataFrame, series: list[str], label, scale=None, unit: 
         for s in series:
             k = (scale(s) if scale else 1.0) or 1.0
             d = part[part["turbine"] == s]
-            row[f"{label(s)}, {unit}"] = f"{_sum(d['p50']) * k:.1f} [{_sum(d['p10']) * k:.1f}–{_sum(d['p90']) * k:.1f}]"
+            row[f"{label(s)}, {unit} · P50 [ΣP10–ΣP90]"] = f"{_sum(d['p50']) * k:.1f} [{_sum(d['p10']) * k:.1f}–{_sum(d['p90']) * k:.1f}]"
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -541,7 +569,8 @@ def ramp_windows(d: pd.DataFrame) -> list[dict]:
     d = d.sort_values("lead_hours")
     p, t = d["p50"].to_numpy(), list(d["time_local"])
     return [{"t0": t[i - 1], "t1": t[i], "value": float(abs(p[i] - p[i - 1])), "sign": float(p[i] - p[i - 1])}
-            for i in range(1, len(p)) if abs(p[i] - p[i - 1]) > RAMP_THRESHOLD]
+            for i in range(1, len(p)) if pd.Timestamp(t[i]) - pd.Timestamp(t[i - 1]) == pd.Timedelta(hours=1)
+            and abs(p[i] - p[i - 1]) > RAMP_THRESHOLD]
 
 
 def calm_windows(d: pd.DataFrame) -> list[dict]:
@@ -550,6 +579,10 @@ def calm_windows(d: pd.DataFrame) -> list[dict]:
     p, t = d["p50"].to_numpy(), list(d["time_local"])
     out, start = [], None
     for i, v in enumerate(list(p) + [np.inf]):
+        if start is not None and i < len(t) and pd.Timestamp(t[i]) - pd.Timestamp(t[i - 1]) != pd.Timedelta(hours=1):
+            if i - start >= CALM_MIN_HOURS:
+                out.append({"t0": t[start], "t1": t[i - 1], "hours": i - start})
+            start = None
         if v <= CALM_LEVEL and start is None:
             start = i
         elif v > CALM_LEVEL and start is not None:
@@ -583,7 +616,7 @@ def alert_rows(res: "ForecastResult", view: pd.DataFrame, custom_banner: bool = 
             rows.append({"level": "error", "title": "Ошибка ядра", "interval": "", "value": msg[:140], "action": "", "t": t_first})
     for f in a.get("flags", []):
         code, lvl, msg = f.get("code", ""), f.get("level", "info"), str(f.get("message", ""))
-        level = "error" if code in _ALERT_ERROR else ("warning" if lvl == "warning" else "info")
+        level = "error" if code in _ALERT_ERROR or code == "analysis_unavailable" else ("warning" if lvl == "warning" else "info")
         row = {"level": level, "code": code, "title": code, "interval": _span(t_first, t_last), "value": msg[:140],
                "action": "", "t": t_first}
         if code == "ramp":
@@ -622,6 +655,8 @@ def alert_rows(res: "ForecastResult", view: pd.DataFrame, custom_banner: bool = 
                        value=f"{m.get('vs_climatology_pct', 0):+.0f} % к норме {m.get('climatology_mean', float('nan')):.2f}, порог ±50 %")
         elif code == "input_quality":
             row.update(title="Качество входных данных", action="повторный запрос погоды")
+        elif code == "analysis_unavailable":
+            row.update(title="Проверки периода недоступны", action="повторить расчёт")
         elif code in _ALERT_ERROR:
             row.update(title={"range_violation": "Значения вне [0, 1]", "quantile_order": "Нарушен порядок квантилей",
                               "incomplete": "Неполный прогноз"}[code], action="пересчитать")
@@ -637,13 +672,95 @@ def alert_rows(res: "ForecastResult", view: pd.DataFrame, custom_banner: bool = 
 
 
 # ---------------------------------------------------------------- факт SCADA и точность
+def historical_validation(root: Path | None = None, *, today: date | None = None,
+                          forecast_model_sha256: str | None = None) -> dict:
+    """Исторический бэктест только при согласованных хэшах модели, кода признаков и метрик.
+
+    status=verified означает соответствие файлов manifest, а не доказательство качества текущего выпуска.
+    При отсутствии или несовпадении provenance метрики не возвращаются. Возраст — относительно конца теста,
+    а не времени генерации JSON: свежая запись файла не делает зимнюю выборку новой.
+    """
+    import hashlib
+
+    base = Path(root or config.ROOT).resolve()
+    unavailable = {"status": "unavailable", "message": "Историческая проверка для этой версии модели не опубликована.",
+                   "metrics": None, "manifest": None, "test_age_days": None}
+    manifest_path = base / "models" / "validation_manifest.json"
+    if not manifest_path.is_file():
+        return unavailable
+
+    def path_inside(relative: str) -> Path:
+        p = (base / relative).resolve()
+        if not p.is_relative_to(base):
+            raise ValueError("validation path outside repository")
+        return p
+
+    def sha(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+            raise ValueError("unknown validation schema")
+        sources = manifest["source_sha256"]
+        required = {"src/wind_agent/data.py", "src/wind_agent/features.py", "src/wind_agent/model.py"}
+        if not isinstance(sources, dict) or not required <= set(sources):
+            raise ValueError("missing source provenance")
+        files = [(manifest.get("model_file", "models/power_model.joblib"), manifest["model_sha256"]),
+                 (manifest["metrics_file"], manifest["metrics_sha256"]), *sources.items()]
+        for relative, expected in files:
+            if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+                raise ValueError("invalid validation hash")
+            if sha(path_inside(relative)) != expected:
+                return {**unavailable, "status": "mismatch",
+                        "message": "Модель, признаки или метрики изменились после проверки. Нужен обновлённый бэктест."}
+        if forecast_model_sha256 and forecast_model_sha256 != manifest["model_sha256"]:
+            return {**unavailable, "status": "mismatch",
+                    "message": "Отображается прогноз предыдущей версии модели. Пересчитайте его для сопоставления с проверкой."}
+        metrics = json.loads(path_inside(manifest["metrics_file"]).read_text(encoding="utf-8"))
+        overall = metrics["overall"]
+        for key in ("mae", "rmse", "bias", "n"):
+            if not math.isfinite(float(overall["model"][key])):
+                raise ValueError("invalid validation metric")
+        if overall["model"]["n"] <= 0 or not metrics["by"]:
+            raise ValueError("empty validation")
+        if not 0 <= float(overall["coverage_p10_p90_pct"]) <= 100:
+            raise ValueError("invalid coverage")
+        period = manifest["test_period"]
+        test_start, test_end = pd.Timestamp(period["start"]).date(), pd.Timestamp(period["end"]).date()
+        calibration = manifest["calibration_period"]
+        train_end = pd.Timestamp(manifest["train_end"]).date()
+        if not (pd.Timestamp(calibration["start"]).date() <= pd.Timestamp(calibration["end"]).date()
+                <= train_end < test_start <= test_end):
+            raise ValueError("invalid temporal validation protocol")
+        actual_period = [pd.Timestamp(t).date() for t in metrics["test_range"]]
+        if actual_period != [test_start, test_end]:
+            raise ValueError("test period does not match metrics")
+        if (pd.Timestamp(metrics["train_range"][-1]).date() != train_end or
+                [pd.Timestamp(t).date() for t in metrics["calibration"]["range"]] !=
+                [pd.Timestamp(calibration[k]).date() for k in ("start", "end")]):
+            raise ValueError("training or calibration period does not match metrics")
+        age = ((today or pd.Timestamp.now(tz="UTC").date()) - test_end).days
+        if age < 0 or not manifest.get("protocol") or not manifest.get("limitations"):
+            raise ValueError("incomplete validation description")
+        if pd.isna(pd.Timestamp(manifest["created_at_utc"])):
+            raise ValueError("invalid validation timestamp")
+        return {"status": "verified", "metrics": metrics, "manifest": manifest, "test_age_days": age,
+                "message": "Историческая проверка конфигурации на отложенном периоде. Финальная модель переобучена "
+                           "на более поздних данных; это не измерение точности выбранного выпуска."}
+    except FileNotFoundError:
+        return {**unavailable, "message": "Файлы исторической проверки для этой версии модели доступны не полностью."}
+    except (OSError, ValueError, TypeError, KeyError, IndexError):
+        return {**unavailable, "status": "invalid", "message": "Метаданные исторической проверки повреждены или неполны."}
+
+
 @functools.lru_cache(maxsize=1)
 def nurly_actual() -> dict:
     """Часовой факт SCADA «Нурлы» (доля номинала, индекс UTC): t1, t2 и farm = среднее. До 31.01.2026."""
     from wind_agent.evaluate import load_actual_hourly
     act = {t: load_actual_hourly(p) for t, p in config.RAW_FILES.items() if Path(p).exists()}
     if len(act) > 1:
-        act[FARM] = pd.concat(act.values(), axis=1).mean(axis=1)
+        act[FARM] = pd.concat(act.values(), axis=1, sort=True).mean(axis=1)
     return act
 
 
@@ -761,8 +878,8 @@ def why_lines(res: "ForecastResult", view: pd.DataFrame, analysis: dict | None =
             n = upwind_count(mean_dir, layout)
             per_hour = np.array([upwind_count(float(x), layout) > 0 for x in wd[ok]])
             wake_share = float((w[ok] * per_hour).sum() / w[ok].sum())
-            meaning = (f"наветренная сторона свободна — потерь в следе не ожидается" if n == 0 else
-                       f"{100 * wake_share:.0f} % выработки в зоне следа соседних турбин — возможны потери")
+            meaning = ("по схеме OSM в этом секторе соседей не найдено; это не оценка потерь" if n == 0 else
+                       f"{100 * wake_share:.0f} % ожидаемой выработки при ветре со стороны соседей; потери не рассчитаны")
             out.append(("Направление", f"{compass(mean_dir)} {mean_dir:.0f}°, с наветренной стороны {n} турб.", meaning))
         else:
             out.append(("Направление", f"{compass(mean_dir)} {mean_dir:.0f}°", "схемы парка нет — след не оценивается"))
@@ -772,7 +889,7 @@ def why_lines(res: "ForecastResult", view: pd.DataFrame, analysis: dict | None =
         if e.notna().any():
             m = float(e.mean())
             lo, hi = ENS_STD_TERCILES
-            meaning = ("модели согласованы — прогноз ветра надёжнее обычного" if m < lo else
+            meaning = ("модели близки между собой; это не подтверждает точность прогноза" if m < lo else
                        "обычное расхождение моделей" if m <= hi else "модели расходятся сильнее обычного — выше неопределённость")
             out.append(("Разброс ансамбля", f"{m:.1f} м/с (GFS/ICON/ECMWF)", meaning))
     a = analysis if analysis is not None else horizon_analysis(res, int(view["lead_hours"].max()) if len(view) else None)
@@ -1058,27 +1175,76 @@ def _fact_line(fact: dict | None) -> str:
     return f"проверено чисел {fact.get('checked', 0)} · не подтверждено {bad}"
 
 
-def forecast_card(res: ForecastResult) -> dict:
-    """Данные карточки агента по выпуску прогноза: шаги из res.trace, решение, сверка чисел, текст агента."""
+def operator_summary(res: ForecastResult, horizon: int | None = None) -> dict:
+    """Краткая сводка выбранного периода; «готов» означает окончание расчёта, а не разрешение выдачи в сеть."""
+    h = int(horizon or res.params.horizon)
+    v = res.view(h)
+    a = horizon_analysis(res, h)
+    main = FARM if FARM in set(v["turbine"]) else (res.series[0] if res.series else FARM)
+    d = v[v["turbine"] == main]
+    cap = res.site.capacity_mw(main)
+    stats = series_stats(v, main)
+    flags = list(a.get("flags") or [])
+    log_error = any(level.lower() in {"error", "critical"} for level, _ in res.core_log)
+    error = log_error or not len(d) or any(f.get("code") in _ALERT_ERROR | {"analysis_unavailable"} for f in flags)
+    warning = bool(res.notices or res.site.transfer or any(f.get("level") == "warning" or
+                   f.get("code") in {"low_confidence", "ensemble_gap"} for f in flags))
+    status = "error" if error else "warning" if warning else "ready"
+    title = {"ready": "Расчёт готов", "warning": "Проверьте ограничения", "error": "Требуется проверка данных"}[status]
+    energy = round(stats["energy"] * cap, 1) if cap and len(d) else None
+    mean = round(float(d["p50"].mean()) * cap, 2) if cap and len(d) else None
+    period = _span(d["time_local"].min(), d["time_local"].max()) if len(d) else ""
+    if energy is not None:
+        message = f"За {h} ч ожидается {energy:.1f} МВт·ч; средняя мощность {mean:.2f} МВт."
+    elif len(d):
+        message = f"Средняя мощность за {h} ч — {100 * stats['mean_p50']:.0f} % номинала; мощность площадки не задана."
+    else:
+        message = "На выбранный период данных нет."
+    reasons = {"analysis_unavailable": "Проверки выбранного периода недоступны.",
+               "incomplete": "Прогноз получен не на все часы.", "range_violation": "В прогнозе недопустимые значения мощности.",
+               "quantile_order": "Нарушен порядок границ прогноза.", "low_confidence": "Разброс прогноза велик.",
+               "ensemble_gap": "Доступны не все погодные модели.", "input_quality": "Есть замечания к входным данным.",
+               "transfer": "У площадки нет истории выработки для проверки модели.",
+               "ramp": "Ожидается резкое изменение мощности.", "revision": "Прогноз существенно изменился к прошлому выпуску."}
+    if log_error:
+        message += " Расчёт сообщил об ошибке; проверьте журнал."
+    elif status != "ready":
+        relevant = [f for f in flags if f.get("level") == "warning" or
+                    f.get("code") in {"low_confidence", "ensemble_gap", "transfer"}]
+        reason = next((reasons[f["code"]] for f in relevant if f.get("code") in reasons), None)
+        if reason:
+            message += " " + reason
+        elif res.site.transfer:
+            message += " " + reasons["transfer"]
+        elif res.notices:
+            message += " Есть ограничения расчёта; подробности ниже."
+    return {"status": status, "title": title, "message": message, "horizon_hours": h, "period": period,
+            "energy_mwh": energy, "mean_mw": mean, "flags": flags}
+
+
+def forecast_card(res: ForecastResult, horizon: int | None = None) -> dict:
+    """Ход расчёта выпуска и результат проверки выбранного горизонта; подробный отчёт ядра остаётся отдельно."""
     fin = res.final or {}
+    summary = operator_summary(res, horizon)
     steps = []
     for t in res.trace:
         tool = str(t.get("tool", ""))
         steps.append({"tool": tool, "label": TOOL_RU.get(tool, tool), "status": str(t.get("status", "ok")),
                       "ms": int(round(float(t.get("duration_s") or 0) * 1000)), "summary": str(t.get("summary", ""))[:160],
                       "llm": bool(t.get("llm_used"))})
-    dec = str(fin.get("decision") or "—")
+    dec = {"ready": "accept", "warning": "flag", "error": "recalculate"}[summary["status"]]
     iss = str(res.meta.get("issue_time_local") or "")[:16]
     live = res.params.mode == MODE_LIVE
-    subject = f"{res.site.short_name} · {'LIVE' if live else 'ретроспектива'} · выпуск " + (_dm(iss) if iss else res.issue_label)
-    fact = fin.get("fact_check") or {}
+    subject = (f"{res.site.short_name} · {summary['horizon_hours']} ч · "
+               f"{'LIVE' if live else 'ретроспектива'} · выпуск " + (_dm(iss) if iss else res.issue_label))
     return {"mode": "forecast", "subject": subject,
             "engine": f"LLM {fin.get('model') or llm_model_name()}" if fin.get("llm_used") else "правила",
             "steps": steps, "orbit": FORECAST_ORBIT,
-            "decision": {"code": dec, "word": dec.upper(), "ru": DECISION_RU.get(dec, ""),
+            "decision": {"code": dec, "word": summary["title"], "ru": DECISION_RU.get(dec, ""),
                          "rules": str(fin.get("rules_decision") or "")},
-            "check": _fact_line(fact), "check_bad": len(fact.get("unverified") or []),
-            "message": str(fin.get("narrative") or ""), "reasoning": str(fin.get("reasoning") or ""),
+            "check": "", "check_bad": 0, "horizon_hours": summary["horizon_hours"],
+            "message": summary["message"],
+            "reasoning": " ".join(flag_text(f, horizon_analysis(res, horizon)) for f in summary["flags"][:2]),
             "total_ms": int(sum(s["ms"] for s in steps))}
 
 
@@ -1151,26 +1317,32 @@ def study_card(study: dict) -> dict:
             "message": msg, "reasoning": "", "total_ms": int(sum(s["ms"] for s in steps))}
 
 
-def agent_card_html(payload: dict, animate: bool = True, intro: bool = False, nonce: str = "", height: int = 320) -> str:
-    """HTML карточки агента для st.components.v1.html: шаблон ui/assets/agent_card.html + JSON данных.
-    animate — лента шагов и печать текста (один раз на новый результат, повтор отсекает sessionStorage по ключу),
-    intro — «эффект запуска» при первом открытии страницы."""
+def agent_card_html(payload: dict, animate: bool = False, intro: bool = False, nonce: str = "", height: int = 108) -> str:
+    """Компактная схема фактических стадий; animate включает однократный световой акцент.
+
+    Начальная загрузка статична. intro сохранён для совместимости вызовов и не включает видео.
+    Повтор анимации отсекает sessionStorage; reduced-motion полностью отключает движение.
+    """
     htm = CARD_TEMPLATE.read_text(encoding="utf-8")
     data = dict(payload, key=_card_key(payload) + (f"-{nonce}" if nonce else ""), animate=bool(animate), intro=bool(intro),
-                height=int(height), video=intro_video_uri())
+                height=int(height), video=None)
     js = json.dumps(data, ensure_ascii=False, default=str).replace("</", "<\\/")
     return htm.replace(CARD_DATA_MARK, js, 1)
 
 
 # ---------------------------------------------------------------- вопрос агенту
 QA_SYSTEM = """Ты — агент WindAgent, помощник диспетчера ветроэлектростанции в Казахстане. Отвечай на вопрос оператора
-только по данным JSON-контекста: прогноз и анализ агента (мощность — доля номинала, энергия — часы номинала «ч.н.» и МВт·ч),
+только по текущему JSON-контексту: мощность указана в МВт, энергия в МВт·ч; для долей явно указаны единицы.
 показатели панели, при наличии — исследование площадки (ERA5 за год, КИУМ, выработка, сравнение с ВЭС «Нурлы»).
 Числа бери ТОЛЬКО из JSON (можно округлять, доли писать в процентах); ничего не пересчитывай, не складывай и не придумывай.
 Если в данных ответа нет — прямо скажи, каких данных не хватает. Отвечай на русском, кратко: 2–5 предложений, без заголовков
 и без таблиц; время — местное (UTC+5), даты — в виде «11.02 06:00». Никогда не называй ключи и поля JSON (energy_day2,
 peak_p50, calm_windows и т. п.) — пиши человеческим языком диспетчера: «вторые сутки», «пик мощности», «окна штиля».
-Энергию приводи в МВт·ч (и при необходимости в ч.н.), мощность — в МВт или % номинала."""
+Энергию приводи в МВт·ч, мощность — в МВт или % номинала. Не переноси числа из истории диалога в текущий период.
+Суммы почасовых границ P10 и P90 НЕ являются калиброванным интервалом энергии. Квантили парка построены
+из квантилей турбин: покрытие интервала парка отдельно не проверено. Ширина интервала и согласие моделей
+не доказывают точность. Автопроверки не означают готовность к диспетчерскому планированию.
+Низкая выработка — только кандидат на окно ТО; безопасность работ по этому прогнозу не оценена."""
 
 
 def _panel_extras(res: ForecastResult, horizon: int = 48, analysis: dict | None = None) -> dict:
@@ -1236,13 +1408,41 @@ def qa_context(res: ForecastResult | None, study: dict | None,
     fc = None
     if fres is not None:
         extras = _panel_extras(fres, h, a)
-        ctx["прогноз"] = {"площадка": fres.site.short_name, "выпуск": fres.issue_label, "горизонт_ч": h,
-                          "примечание": f"ключи energy_48h* в анализе — энергия за выбранный горизонт {h} ч",
-                          "решение_агента": fres.final.get("decision"), "обоснование": fres.final.get("reasoning"),
-                          "анализ": {k: v for k, v in a.items() if k != "checks"}, "панель": extras,
-                          "пороги": {"рампа_доли_ном_в_час": RAMP_THRESHOLD, "штиль_P50_не_выше": CALM_LEVEL,
-                                     "штиль_мин_часов": CALM_MIN_HOURS, "широкий_интервал": WIDE_BAND_THRESHOLD}}
+        main = FARM if FARM in (a.get("metrics") or {}) else fres.series[0]
+        m = (a.get("metrics") or {}).get(main) or {}
+        cap = fres.site.capacity_mw(main)
+        panel = {"номинальная мощность, МВт": cap, "пик мощности, МВт": extras.get("peak_mw") if cap else None,
+                 "время пика": extras.get("peak_time_local"), "средняя мощность, доля номинала": m.get("mean_p50"),
+                 "минимальная мощность, доля номинала": extras.get("min_p50"),
+                 "средний ветер на 100 м, м/с": m.get("mean_wind_100m"),
+                 "выработка выбранного периода, МВт·ч": extras.get("energy_48h_mwh_panel") if cap else None,
+                 "сумма почасовых нижних границ, МВт·ч": extras.get("energy_48h_p10_mwh_panel") if cap else None,
+                 "сумма почасовых верхних границ, МВт·ч": extras.get("energy_48h_p90_mwh_panel") if cap else None,
+                 "часовые перепады мощности": [{"с": r["from"], "до": r["to"], "изменение, МВт": r["delta_mw"]}
+                                               for r in extras.get("ramps_over_threshold", [])] if cap else [],
+                 "максимальный часовой перепад, МВт/ч": extras.get("max_ramp_mw") if cap else None,
+                 "время максимального перепада": m.get("max_ramp_time_local"),
+                 "окна низкой выработки": extras.get("calm_windows"),
+                 "средняя ширина почасовых границ, доля номинала": m.get("mean_band_p90_p10"),
+                 "климатическая норма, доля номинала": m.get("climatology_mean"),
+                 "отклонение от климатической нормы, %": m.get("vs_climatology_pct")}
+        v = fres.view(h)
+        hours = v[v["turbine"] == main].groupby(v["time_local"].dt.strftime("%Y-%m-%d")).size()
+        panel["выработка по календарным дням"] = [
+            {"дата": day, "часов в выбранном периоде": int(hours.get(day, 0)),
+             "МВт·ч": extras.get(f"energy_{day}_mwh") if cap else None}
+            for day in (m.get("energy_by_day") or {})]
+        summary = operator_summary(fres, h)
+        ctx["прогноз"] = {"площадка": fres.site.short_name, "выпуск": fres.issue_label, "горизонт, ч": h,
+                          "период": summary["period"], "статус автопроверок": summary["title"], "показатели": panel,
+                          "ограничения": [flag_text(f, a) for f in a.get("flags", [])],
+                          "интервалы": "Суммы почасовых границ не являются калиброванным интервалом энергии; "
+                                        "покрытие границ мощности парка отдельно не проверено.",
+                          "пороги": {"рампа, доля номинала в час": RAMP_THRESHOLD,
+                                     "низкая мощность, доля номинала": CALM_LEVEL,
+                                     "минимум часов подряд для окна": CALM_MIN_HOURS}}
         allowed = {**a, "metrics": {**(a.get("metrics") or {}), "panel": _flat_dict(extras)}}
+        allowed["metrics"]["panel"].update(_flat_dict(panel))
         allowed["metrics"]["panel"].update(ramp=RAMP_THRESHOLD, calm=CALM_LEVEL, calm_h=CALM_MIN_HOURS, band=WIDE_BAND_THRESHOLD)
         fc = fres.forecast[fres.forecast["lead_hours"] <= h]
     a_st = (study or {}).get("assessment")
@@ -1286,51 +1486,59 @@ def rules_answer(question: str, res: ForecastResult | None, study: dict | None, 
     fres, h, a = _pick(res, study, horizon)
     if fres is None:
         return None
+    if not a.get("metrics"):
+        return "Проверки выбранного периода недоступны. Повторите расчёт перед использованием прогноза."
     main = FARM if FARM in (a.get("metrics") or {}) else (fres.series[0] if fres.series else FARM)
     m = (a.get("metrics") or {}).get(main) or {}
     ex = _panel_extras(fres, h, a)
     cap = ex.get("capacity_mw") or 0
     name = fres.site.short_name
-    if _has(q, "энерг", "выработ", "мвт·ч", "мвтч", "сколько", "48", "24", "итог"):
-        days = m.get("energy_by_day") or {}
-        by_day = "; ".join(f"{_dm(d + ' 00:00')[:5]} — {e} ч.н. ({ex.get(f'energy_{d}_mwh', '—')} МВт·ч)" for d, e in days.items())
-        mwh = m.get("energy_48h_mwh", ex.get("energy_48h_mwh_panel"))
-        return (f"Ожидаемая выработка {name} за {h} ч — {mwh} МВт·ч P50 ({m.get('energy_48h')} ч.н., интервал P10–P90 "
-                f"{m.get('energy_48h_p10')}–{m.get('energy_48h_p90')} ч.н.). По суткам: {by_day}.")
+    if _has(q, "уверен", "интервал", "неопредел", "p10", "p90", "точн", "надеж", "надёж", "качеств", "довер"):
+        band = m.get("mean_band_p90_p10")
+        width = round(100 * float(band), 1) if band is not None else "—"
+        return (f"Средняя ширина почасовых границ P10–P90 — {width} % номинала. "
+                "Это разброс прогноза, а не оценка точности. Покрытие границ парка отдельно не проверено; "
+                "суммы почасовых границ не являются калиброванным интервалом энергии.")
     if _has(q, "пик", "максим", "наибольш"):
-        return (f"Пик P50 — {ex.get('peak_p50')} доли номинала ({ex.get('peak_mw')} МВт) в {ex.get('peak_time_local')}. "
+        return (f"Пик мощности — {ex.get('peak_mw')} МВт в {ex.get('peak_time_local')}. "
                 f"Средняя загрузка за {h} ч — {round(100 * float(m.get('mean_p50') or 0))} % номинала.")
     if _has(q, "рамп", "скач", "перепад", "резк"):
         n = m.get("n_ramps_over_threshold", 0)
-        head = (f"Максимальный часовой перепад P50 — {m.get('max_ramp')} доли номинала ({ex.get('max_ramp_mw')} МВт/ч) "
+        head = (f"Максимальный часовой перепад мощности — {ex.get('max_ramp_mw')} МВт/ч "
                 f"в {_dm(m.get('max_ramp_time_local'))}.")
-        tail = (f" Часов с перепадом выше порога {RAMP_THRESHOLD} — {n}; проверьте график выдачи." if n
-                else f" Порог {RAMP_THRESHOLD} доли ном./ч не превышен — резких рамп нет.")
+        tail = (f" Часов с перепадом выше порога {RAMP_THRESHOLD * 100:.0f} % номинала в час — {n}; проверьте график выдачи." if n
+                else f" В прогнозе нет перепадов выше {RAMP_THRESHOLD * 100:.0f} % номинала в час; фактические рампы возможны.")
         return head + tail
     if _has(q, "штил", " то", "то ", "обслуж", "ремонт", "окн"):
         calms = ex.get("calm_windows") or []
         if calms:
             w = max(calms, key=lambda c: c["hours"])
-            return (f"Окон штиля (P50 ≤ {CALM_LEVEL} не менее {CALM_MIN_HOURS} ч) — {len(calms)}; самое длинное "
-                    f"{w['hours']} ч, {w['from']}–{w['to']}. Это окно подходит для ТО с минимальной потерей выработки.")
-        return (f"Окон штиля (P50 ≤ {CALM_LEVEL} не менее {CALM_MIN_HOURS} ч подряд) в прогнозе нет; часов почти без генерации — "
+            return (f"Окон низкой выработки (мощность ≤ {100 * CALM_LEVEL:.0f} % номинала не менее {CALM_MIN_HOURS} ч) — {len(calms)}; самое длинное "
+                    f"{w['hours']} ч, {w['from']}–{w['to']}. Это кандидат для ТО; погоду и условия безопасности нужно проверить отдельно.")
+        return (f"Окон низкой выработки (мощность ≤ {100 * CALM_LEVEL:.0f} % номинала не менее {CALM_MIN_HOURS} ч подряд) в прогнозе нет; часов почти без генерации — "
                 f"{round(100 * float(m.get('share_calm') or 0))} %. Для ТО выберите часы минимальной мощности: "
-                f"минимум P50 — {ex.get('min_p50')} доли номинала.")
+                f"минимум — {round(100 * float(ex.get('min_p50') or 0))} % номинала; это не оценка безопасности работ.")
     if _has(q, "лучш", "худш", "день", "сутк", "завтра"):
         days = m.get("energy_by_day") or {}
         if days:
             best = max(days, key=days.get)
             worst = min(days, key=days.get)
-            return (f"Лучшие сутки — {_dm(best + ' 00:00')[:5]}: {days[best]} ч.н. ({ex.get(f'energy_{best}_mwh')} МВт·ч); "
-                    f"худшие — {_dm(worst + ' 00:00')[:5]}: {days[worst]} ч.н. ({ex.get(f'energy_{worst}_mwh')} МВт·ч).")
-    if _has(q, "уверен", "интервал", "неопредел", "p10", "p90", "точн"):
-        band = m.get("mean_band_p90_p10")
-        word = confidence_word(float(band)) if band is not None else "—"
-        return (f"Средняя ширина интервала P10–P90 — {band} доли номинала, уверенность {word} "
-                f"(порог широкого интервала {WIDE_BAND_THRESHOLD}).")
+            return (f"В выбранном периоде больше выработка {_dm(best + ' 00:00')[:5]}: {ex.get(f'energy_{best}_mwh')} МВт·ч; "
+                    f"меньше — {_dm(worst + ' 00:00')[:5]}: {ex.get(f'energy_{worst}_mwh')} МВт·ч. "
+                    "Крайние календарные дни могут быть неполными.")
+    if _has(q, "энерг", "выработ", "мвт·ч", "мвтч", "итог") or re.search(r"\bсколько\b", q):
+        days = m.get("energy_by_day") or {}
+        if not cap:
+            return "Номинальная мощность площадки не задана: выработку в МВт·ч рассчитать нельзя."
+        by_day = "; ".join(f"{_dm(d + ' 00:00')[:5]} — {ex.get(f'energy_{d}_mwh', '—')} МВт·ч" for d in days)
+        mwh = m.get("energy_48h_mwh", ex.get("energy_48h_mwh_panel"))
+        return (f"Ожидаемая выработка {name} за {h} ч — {mwh} МВт·ч по центральному прогнозу. "
+                f"По календарным дням в выбранном периоде: {by_day}.")
     if _has(q, "решени", "почему", "флаг", "accept", "flag", "recalc"):
-        fin = fres.final
-        return f"Решение агента — {fin.get('decision')} ({DECISION_RU.get(str(fin.get('decision')), '')}). {fin.get('reasoning', '')}"
+        summary = operator_summary(fres, h)
+        details = " ".join(flag_text(f, a) for f in summary["flags"][:2])
+        return (f"{summary['title']} для выбранных {h} ч. {details} "
+                "Автопроверки не подтверждают точность прогноза и не заменяют решение диспетчера.").strip()
     if _has(q, "норм", "климат"):
         return (f"Средняя загрузка P50 {m.get('mean_p50')} против климатической нормы месяца {m.get('climatology_mean')} "
                 f"({m.get('vs_climatology_pct'):+} %).")
@@ -1338,16 +1546,17 @@ def rules_answer(question: str, res: ForecastResult | None, study: dict | None, 
 
 
 def ask_agent(question: str, res: ForecastResult | None, study: dict | None = None, history: list | None = None,
-              horizon: int | None = None) -> dict:
+              horizon: int | None = None, *, use_llm: bool = True) -> dict:
     """Ответ агента оператору: LLM по JSON-контексту с проверкой чисел (verify_narrative, один повтор с перечнем
     неподтверждённых) или — без ключа — ответ по правилам. {"answer", "llm_used", "fact_check", "model"}."""
     question = str(question or "").strip()[:600]
     ctx, allowed, fc = qa_context(res, study, horizon)
-    settings = llm.llm_settings()
+    settings = llm.llm_settings() if use_llm else None
     if not settings:
         ans = rules_answer(question, res, study, horizon)
         if ans is None:
-            ans = ("Для свободного вопроса нужен ключ OpenAI. По правилам отвечу про энергию за 48 ч, пик, рампы, "
+            ans = (("Для свободного вопроса нужен ключ OpenAI. " if use_llm else "AI-пояснения выключены. ") +
+                   "По правилам отвечу про выработку выбранного периода, пик, рампы, "
                    "штили и окна ТО, лучший и худший день, уверенность" + (", КИУМ и выработку площадки, сравнение с «Нурлы»"
                                                                            if (study or {}).get("assessment") else "") + ".")
             return {"answer": ans, "llm_used": False, "fact_check": None, "model": ""}
@@ -1370,14 +1579,19 @@ def ask_agent(question: str, res: ForecastResult | None, study: dict | None = No
                 raise ValueError("пустой ответ LLM")
             fact = tools.verify_narrative(text, allowed, fc)
             fact["attempts"] = attempt + 1
-            if fact["ok"]:
+            internal_keys = re.findall(r"\b(?:energy|peak|calm|share|mean|capacity|delta)_[a-zA-Z0-9_]+", text)
+            if fact["ok"] and not internal_keys:
                 break
             bad = ", ".join(str(x) for x in fact["unverified"][:10])
             messages += [{"role": "assistant", "content": text},
-                         {"role": "user", "content": f"Проверка чисел не пройдена: {bad} — этих чисел нет в JSON или они "
-                          "получены пересчётом. Ответь заново, используя только числа из JSON без собственных вычислений."}]
-        if not fact.get("ok"):
-            fact["note"] = "Не подтверждено данными: " + ", ".join(str(x) for x in fact["unverified"][:10])
+                         {"role": "user", "content": f"Исправь ответ. Неподтверждённые числа: {bad or 'нет'}. "
+                          "Не используй технические имена полей JSON. Используй только числа текущего контекста "
+                          "и заданные единицы, без собственных вычислений."}]
+        if not fact.get("ok") or internal_keys:
+            fallback = rules_answer(question, res, study, horizon) or "Ответ не прошёл проверку по данным текущего прогноза."
+            checked = tools.verify_narrative(fallback, allowed, fc)
+            checked["note"] = "Ответ AI отклонён проверкой; показан ответ по правилам."
+            return {"answer": fallback, "llm_used": False, "fact_check": checked, "model": ""}
         return {"answer": text, "llm_used": True, "fact_check": fact, "model": settings["model"]}
     except Exception as e:  # noqa: BLE001 — LLM недоступна: отвечаем по правилам
         ans = rules_answer(question, res, study, horizon) or "LLM недоступна, а по правилам на этот вопрос ответа нет."

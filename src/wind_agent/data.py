@@ -57,6 +57,36 @@ def load_hourly(turbine: str) -> pd.DataFrame:
     return h
 
 
+def weather_neighbors(df: pd.DataFrame) -> pd.DataFrame:
+    """Exact adjacent NWP hours inside one turbine, forecast release and lead.
+
+    Without an explicit issue timestamp (historical training), the nominal
+    23:00 release means each lead covers one local calendar day. Forecast
+    frames carry issue_time_utc, including custom issue hours. Missing hours
+    and release/lead edges use the current forecast; row order is irrelevant.
+    """
+    times = pd.DatetimeIndex(df.index).as_unit("ns")
+    turbine = df["turbine"].astype(str).to_numpy() if "turbine" in df else np.repeat("single", len(df))
+    lead = df["lead_day"].to_numpy()
+    release = (pd.DatetimeIndex(pd.to_datetime(df["issue_time_utc"], utc=True)).asi8
+               if "issue_time_utc" in df else utc_to_local(times).normalize().asi8)
+    key = pd.MultiIndex.from_arrays([turbine, lead, release, times.asi8])
+    if key.has_duplicates:
+        raise ValueError("duplicate weather hour within turbine, issue and lead")
+    current = df["wind_speed_100m"].astype(float).to_numpy()
+    source = pd.Series(current, index=key)
+    context = pd.DataFrame(index=df.index)
+    hour = pd.Timedelta(hours=1).value
+    for name, offset in [("ws100_prev", -1), ("ws100_next", 1)]:
+        target = pd.MultiIndex.from_arrays([turbine, lead, release, times.asi8 + offset * hour])
+        adjacent = source.reindex(target).to_numpy()
+        # Kazakhstan repeated local 23:00 on the UTC+6 -> UTC+5 transition.
+        # The serving local-time grid has no second 23:00; do not use it as +1h.
+        local_adjacent = utc_to_local(times + pd.Timedelta(hours=offset)) == (utc_to_local(times) + pd.Timedelta(hours=offset))
+        context[name] = np.where(pd.notna(adjacent) & local_adjacent, adjacent, current)
+    return context
+
+
 def training_frame(turbine: str, wx: WeatherClient, start: str = config.PREVIOUS_RUNS_START,
                    end: str = config.HISTORY_END) -> pd.DataFrame:
     """Обучающая выборка: факт мощности + прогноз с честным лагом (previous_day1 и previous_day2).
@@ -75,6 +105,9 @@ def training_frame(turbine: str, wx: WeatherClient, start: str = config.PREVIOUS
         for m, d in ens.items():
             for v in config.ENSEMBLE_VARS:
                 f[f"{m}_{v}"] = d[f"{v}_previous_day{lead}"].reindex(f.index)
+        # Forecast-only context must be computed before filtering/joining SCADA.
+        # Otherwise a missing/curtailed actual hour changes the weather features.
+        f[["ws100_prev", "ws100_next"]] = weather_neighbors(f)
         parts.append(f)
     feats = pd.concat(parts)
     df = feats.join(scada, how="inner")

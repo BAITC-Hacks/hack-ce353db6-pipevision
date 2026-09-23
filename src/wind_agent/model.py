@@ -18,6 +18,8 @@ from .weather import WeatherClient
 
 log = logging.getLogger(__name__)
 
+FEATURE_CONTEXT_VERSION = "exact_hour_weather_before_scada_v1"
+
 QUANTILES = {"p10": 0.10, "p90": 0.90}
 HGB_PARAMS = dict(max_iter=500, learning_rate=0.04, max_leaf_nodes=31, min_samples_leaf=40,
                   l2_regularization=1.0, random_state=42)
@@ -150,7 +152,8 @@ def backtest(wx: WeatherClient, out_dir: Path = config.OUTPUTS_DIR) -> dict:
     for t in config.TURBINES:
         m = test["turbine"] == t
         test.loc[m, "persistence"] = persistence_baseline(t, test.index[m], test.loc[m, "lead_day"]).values
-    res = {"train_range": [str(df.index[tr].min()), str(df.index[tr].max())],
+    res = {"feature_context": FEATURE_CONTEXT_VERSION, "features": list(model.features), "params": HGB_PARAMS,
+           "train_range": [str(df.index[tr].min()), str(df.index[tr].max())],
            "test_range": [config.BACKTEST_TEST_START, config.BACKTEST_TEST_END], "n_train": int(tr.sum()),
            "calibration": {"range": [config.BACKTEST_CALIB_START, config.BACKTEST_TRAIN_END], "n": int(cal.sum()),
                            "q_by_lead": {str(k): round(v, 4) for k, v in calib_q.items()}, "nominal_coverage": COVERAGE}, "by": {}}
@@ -194,6 +197,7 @@ def train_final(wx: WeatherClient) -> PowerModel:
     model.calibration = calib_q
     model.meta = {"train_start": str(df.index.min()), "train_end": str(df.index.max()), "n_train": int(len(df)),
                   "turbines": list(config.TURBINES), "features": FEATURES, "params": HGB_PARAMS,
+                  "feature_context": FEATURE_CONTEXT_VERSION,
                   "calibration": {"range": [config.BACKTEST_TEST_START, config.HISTORY_END], "n": int(cal.sum()),
                                   "q_by_lead": {str(k): round(v, 4) for k, v in calib_q.items()}, "nominal_coverage": COVERAGE}}
     path = model.save()
