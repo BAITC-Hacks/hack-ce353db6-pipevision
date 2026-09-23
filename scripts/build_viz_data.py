@@ -41,6 +41,8 @@ from wind_agent import config  # noqa: E402  (только чтение конс
 TERRAIN_DIR = ROOT / "data" / "terrain"
 DEM_CSV = TERRAIN_DIR / "dem_grid.csv"
 DEM_META = TERRAIN_DIR / "meta.json"
+OSM_JSON = TERRAIN_DIR / "osm_context.json"          # scripts/fetch_osm_context.py
+OSM_MATCH_M = 80.0                                   # турбина OSM ближе 80 м к T1/T2 — это она и есть
 ROSE_SOURCE = config.CACHE_DIR / "prevruns__t1__2024-02-16__2026-01-31.csv"
 FORECASTS_GLOB = str(config.OUTPUTS_DIR / "forecasts" / "*.csv")
 VIZ_DIR = ROOT / "viz"
@@ -122,6 +124,93 @@ def load_terrain() -> tuple[dict, list[dict]]:
                          "x_m": round(x, 1), "y_m": round(y, 1),
                          "ground_m": round(bilinear(elev, x, y, x0, y0, step), 1)})
     return terrain, turbines
+
+
+# ------------------------------------------------------------------ контекст OSM
+def _assemble_rings(members: list[dict], lat0: float, lon0: float) -> list[list[list[float]]]:
+    """Члены мультиполигона (way с geometry) → замкнутые кольца; незамкнутые куски склеиваем по концам."""
+    parts = [[to_local(pt["lat"], pt["lon"], lat0, lon0) for pt in m["geometry"]]
+             for m in members if m.get("type") == "way" and m.get("geometry")]
+    rings = []
+    while parts:
+        ring = parts.pop(0)
+        changed = True
+        while changed and ring[0] != ring[-1]:
+            changed = False
+            for k, q in enumerate(parts):
+                if q[0] == ring[-1]:
+                    ring += q[1:]
+                elif q[-1] == ring[-1]:
+                    ring += q[::-1][1:]
+                elif q[-1] == ring[0]:
+                    ring = q + ring[1:]
+                elif q[0] == ring[0]:
+                    ring = q[::-1] + ring[1:]
+                else:
+                    continue
+                parts.pop(k)
+                changed = True
+                break
+        if len(ring) >= 3:
+            rings.append(ring)
+    return rings
+
+
+def load_osm(lat0: float, lon0: float, turbines: list[dict]) -> dict:
+    """Турбины парка, лес и застройка из data/terrain/osm_context.json в локальных координатах рельефа."""
+    empty = {"available": False, "turbines": [], "forest": [], "residential": [],
+             "note": "нет data/terrain/osm_context.json — запустите scripts/fetch_osm_context.py"}
+    if not OSM_JSON.exists():
+        print("OSM: нет osm_context.json — слои OSM не добавлены (scripts/fetch_osm_context.py)", file=sys.stderr)
+        return empty
+    d = json.loads(OSM_JSON.read_text())
+    turb, layers = [], {"forest": [], "residential": []}
+    r1 = lambda v: round(v, 1)  # noqa: E731
+    for el in d.get("elements", []):
+        tags = el.get("tags", {})
+        if el.get("type") == "node" and tags.get("power") == "generator":
+            x, y = to_local(el["lat"], el["lon"], lat0, lon0)
+            best = min(turbines, key=lambda t: math.hypot(x - t["x_m"], y - t["y_m"]))
+            dist = math.hypot(x - best["x_m"], y - best["y_m"])
+            ours = best["id"] if dist <= OSM_MATCH_M else None
+            rec = {"osm_id": el["id"], "x_m": r1(x), "y_m": r1(y), "lat": el["lat"], "lon": el["lon"],
+                   "ours": ours, "match_m": r1(dist) if ours else None,
+                   "model": " ".join(v for v in [tags.get("manufacturer"), tags.get("model")] if v) or None,
+                   "power": tags.get("generator:output:electricity")}
+            turb.append(rec)
+            if ours:  # паспорт нашей турбины из OSM (если заполнен)
+                best.update({"osm_id": el["id"], "osm_match_m": r1(dist), "model": rec["model"], "power": rec["power"]})
+            continue
+        if tags.get("landuse") == "residential":
+            kind = "residential"
+        elif tags.get("landuse") == "forest" or tags.get("natural") == "wood":
+            kind = "forest"
+        else:
+            continue
+        if el.get("type") == "way" and el.get("geometry"):
+            outer = [[to_local(pt["lat"], pt["lon"], lat0, lon0) for pt in el["geometry"]]]
+            inner = []
+        elif el.get("type") == "relation":
+            outer = _assemble_rings([m for m in el.get("members", []) if m.get("role", "outer") in ("outer", "")], lat0, lon0)
+            inner = _assemble_rings([m for m in el.get("members", []) if m.get("role") == "inner"], lat0, lon0)
+        else:
+            continue
+        rings = [[[round(x), round(y)] for x, y in ring] for ring in outer + inner]
+        if not rings:
+            continue
+        xs = [p[0] for p in rings[0]]
+        ys = [p[1] for p in rings[0]]
+        layers[kind].append({"osm_id": el["id"], "osm_type": el["type"],
+                             "name": tags.get("name:ru") or tags.get("name"),
+                             "rings": rings, "n_outer": len(outer),
+                             "label_xy": [round(sum(xs) / len(xs)), round(sum(ys) / len(ys))]})
+    n_ours = sum(1 for t in turb if t["ours"])
+    print(f"OSM: турбин {len(turb)} (из них совпали с T1/T2: {n_ours}), лес {len(layers['forest'])}, "
+          f"застройка {len(layers['residential'])}")
+    return {"available": True, "source": d.get("source", "OpenStreetMap"), "fetched_at_utc": d.get("fetched_at_utc"),
+            "radius_m": d.get("radius_m"), "match_radius_m": OSM_MATCH_M,
+            "turbines": turb, "forest": layers["forest"], "residential": layers["residential"],
+            "note": "© участники OpenStreetMap (ODbL)"}
 
 
 # ------------------------------------------------------------------ роза ветров
@@ -361,6 +450,7 @@ def main() -> int:
     terrain, turbines = load_terrain()
     print(f"Рельеф: {terrain['nx']}×{terrain['ny']}, шаг {terrain['step_m']:.0f} м, "
           f"высоты {terrain['min_m']:.0f}–{terrain['max_m']:.0f} м ({terrain['source']})")
+    osm = load_osm(terrain["center"]["lat"], terrain["center"]["lon"], turbines)
     rose = build_wind_rose()
     print(f"Роза ветров: {rose['all']['n_hours']} ч (весь период), {rose['feb']['n_hours']} ч (февраль); "
           f"преобладает {rose['all']['prevailing']['sector']}")
@@ -386,6 +476,8 @@ def main() -> int:
         "terrain": terrain,
         "turbines": turbines,
         "hub_height_m": 100,
+        "upwind_cone": {"half_angle_deg": 15, "range_m": 2000},
+        "osm": osm,
         "wind_rose": rose,
         "forecasts": issues,
     }

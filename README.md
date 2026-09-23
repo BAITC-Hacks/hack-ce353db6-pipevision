@@ -47,7 +47,8 @@ WindAgent решает задачу кейса. Для каждой даты в�
 - **3D-визуализация рельефа и прогнозного поля ветра** ([`viz/README.md`](viz/README.md)):
   - `scripts/fetch_dem.py` — сетка высот ±6 км вокруг ВЭС с шагом 250 м → `data/terrain/`;
   - `scripts/build_viz_data.py` — рельеф, турбины, роза ветров и прогнозы из `outputs/forecasts/` → `viz/data/viz_data.js` и `viz/wind_rose.png`;
-  - страница `viz/index.html` (three.js с CDN) открывается по `file://` без сервера. На ней можно выбрать дату выпуска и пролистать 48 часов: ветер на 100 м, P10/P50/P90 парка, развороты роторов;
+  - `scripts/fetch_osm_context.py` — раскладка парка (15 турбин ВЭС «Нурлы») и застройка из OpenStreetMap → `data/terrain/osm_context.json`;
+  - страница `viz/index.html` (three.js с CDN) открывается по `file://` без сервера. На ней можно выбрать дату выпуска и пролистать 48 часов: ветер на 100 м, P10/P50/P90 парка, развороты роторов, все турбины парка (наши T1/T2 выделены), посёлок Нурлы и конус наветренной стороны с числом турбин парка в нём (при западном ветре — до 4 турбин перед T1, при восточном — сектор свободен);
   - это визуализация прогноза Open-Meteo в одной точке, а не CFD-расчёт обтекания рельефа.
 - **Воспроизводимость:** `Makefile`, `Dockerfile`, `.env.example`, `requirements.lock`, 16 офлайн-тестов `pytest` (меньше минуты), включая сквозной прогон агента и проверку fallback при недоступной LLM.
 
@@ -400,6 +401,8 @@ wind-agent backtest
 | Historical Forecast API | `historical-forecast-api.open-meteo.com/v1/forecast` | реализован в `weather.py`, в текущем пайплайне не используется |
 | Elevation API | `api.open-meteo.com/v1/elevation` | рельеф для 3D-визуализации (`scripts/fetch_dem.py`) |
 
+**OpenStreetMap** (Overpass API, `scripts/fetch_osm_context.py` → `data/terrain/osm_context.json`): раскладка ВЭС «Нурлы» (15 турбин в радиусе 5 км, из них наши T1/T2 — Goldwind GW109/2500, 2,5 МВт; остальные 13 — к западу и северо-западу в пределах 1,2 км) и полигоны застройки для 3D-сцены и индикатора «турбины парка с наветренной стороны». Полигонов леса в OSM для этой территории нет. Только для визуализации, в модели не используется.
+
 **Кэш:** `data/cache/openmeteo/<тип>__<турбина>__<начало>__<конец>.csv`.
 - В репозитории лежат архивы 16.02.2024–31.01.2026 (обучение) и 30.01–02.03.2026 (тестовый период) для обеих турбин и всех четырёх моделей погоды.
 - Клиент сначала ищет файл, покрывающий запрошенный диапазон, и только при промахе идёт в API; ответ он сохраняет в кэш.
@@ -474,6 +477,7 @@ wind-agent backtest
 | Open-Meteo API | архивные и оперативные прогнозы погоды (модели NOAA GFS, DWD ICON, ECMWF IFS), рельеф | данные CC BY 4.0, «Weather data by Open-Meteo.com» |
 | Copernicus DEM GLO-90 (через Open-Meteo Elevation API) | высоты рельефа для визуализации (`data/terrain/`) | © DLR e.V., © Airbus Defence and Space GmbH; предоставлено по программе Copernicus (ЕС, ESA) |
 | three.js 0.160 (CDN cdn.jsdelivr.net) | 3D-сцена `viz/index.html`, OrbitControls | MIT |
+| OpenStreetMap (Overpass API) | раскладка турбин парка и застройка для 3D-сцены (`data/terrain/osm_context.json`) | ODbL 1.0, © участники OpenStreetMap |
 | OpenAI API | LLM-агент (необязательно) | условия OpenAI |
 | Датасет организаторов | SCADA турбин 1 и 2 | материалы кейса |
 
