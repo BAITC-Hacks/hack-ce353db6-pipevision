@@ -36,6 +36,8 @@
 
 ## Сборка данных
 
+Команды выполняются из корня проекта после установки по [основному README](../README.md#7-установка-и-запуск), где создана `.venv`. DEM, OSM и готовые `viz/data/viz_data.js` уже включены в репозиторий: для просмотра повторная загрузка не нужна. `make viz` на сохранённых данных проверен офлайн; загрузчики DEM/OSM обращаются в сеть, только если соответствующих файлов нет или задан `--force`.
+
 ```bash
 .venv/bin/python scripts/fetch_dem.py          # рельеф → data/terrain/dem_grid.csv + meta.json (≈5 мин, один раз)
 .venv/bin/python scripts/fetch_osm_context.py  # OSM → data/terrain/osm_context.json (турбины, лес, застройка; один раз)
@@ -66,7 +68,7 @@
 
 - Дважды щёлкните `viz/index.html`: данные подключаются обычным `<script src="data/viz_data.js">`, поэтому
   страница работает по `file://` без сервера. Для three.js с cdn.jsdelivr.net нужен интернет.
-- Или запустите локальный сервер: `.venv/bin/python -m http.server 8765 --directory viz` и откройте http://localhost:8765.
+- Или запустите локальный сервер: `.venv/bin/python -m http.server 8765 --directory viz` и откройте [http://localhost:8765](http://localhost:8765). Офлайн-доступ к прогнозам не означает офлайн-загрузку three.js: CDN должен быть доступен браузеру.
 
 ## Файлы
 
