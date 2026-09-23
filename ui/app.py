@@ -1,11 +1,13 @@
 """WindAgent — панель оператора ВЭС (Streamlit).
 
 Запуск из корня репозитория: `make ui` (или `.venv/bin/streamlit run ui/app.py`).
-Вся работа с ядром — в ui/core.py (run_forecast); здесь только ввод параметров и отображение.
-Каркас: шапка → 3D-сцена текущей площадки и карта ветрового ресурса Казахстана (атлас, выбор точки кликом) →
-прогноз «Нурлы» (5 KPI, веерный график парка, «Почему такой прогноз») → «Исследование площадки» (оценка ресурса за год,
-прогноз 48 ч переносом модели, отчёт для руководства) → вкладки «Предупреждения», «Тестовый период», «Таблицы и выгрузка»,
-«Агент», «Факт и точность». Пороги рамп, штиля и уверенности — из wind_agent.agent.tools (как у агента).
+Вся работа с ядром — в ui/core.py (run_forecast, run_assessment, ask_agent); здесь только ввод параметров и отображение.
+Каркас: шапка → переключатель «Оператор» / «Исследование площадки» → карточка агента (ход цикла, решение, сообщение
+с печатью, диалог) → пространство. «Оператор»: риски, 5 KPI, веер P10–P90, «Почему такой прогноз», изменения к D−1,
+выгрузка, 3D-сцена «Нурлы» (свёрнута), вкладки «Таблицы и выгрузка», «Тестовый период», «Факт и точность»,
+«Журнал агента»; все блоки — по выбранному горизонту (core.horizon_analysis). «Исследование площадки»: 3D-сцена и карта
+ветрового ресурса Казахстана (атлас, выбор точки кликом), форма, оценка ресурса за год, прогноз 48 ч переносом модели,
+отчёт для руководства. Пороги рамп, штиля и уверенности — из wind_agent.agent.tools (как у агента).
 """
 from __future__ import annotations
 
@@ -118,6 +120,10 @@ st.markdown("""<style>
 [data-testid="stNumberInputStepDown"],[data-testid="stNumberInputStepUp"]{display:none}
 .wa-ph{display:flex;align-items:center;justify-content:center;border:1px solid rgba(128,128,128,.3);border-radius:.4rem;font-size:.85rem;opacity:.75;background:rgba(128,128,128,.06);text-align:center;padding:1rem}
 @media (max-width:700px){.wa-why{grid-template-columns:1fr;gap:0}.wa-why-m{margin-bottom:.35rem}}
+.st-key-wa_hero{padding:0;margin:.1rem 0 .6rem}
+.st-key-wa_hero [data-testid="stChatMessage"]{padding:.35rem .6rem;background:rgba(15,28,46,.55);border:1px solid rgba(56,189,248,.14)}
+.st-key-wa_hero [data-testid="stChatInput"]{border-color:rgba(45,212,191,.35)}
+.st-key-wa_hero iframe{display:block}
 </style>""", unsafe_allow_html=True)
 
 
@@ -265,8 +271,8 @@ def issue_local(res: core.ForecastResult) -> pd.Timestamp | None:
     return pd.Timestamp(v) if v else None
 
 
-def header(res: core.ForecastResult, view: pd.DataFrame, horizon: int, stale: bool) -> None:
-    fin, site, a = res.final, res.site, res.analysis
+def header(res: core.ForecastResult, view: pd.DataFrame, horizon: int, stale: bool, analysis: dict | None = None) -> None:
+    fin, site, a = res.final, res.site, (analysis if analysis is not None else res.analysis)
     src = str(res.meta.get("source") or res.forecast["weather_source"].iloc[0])
     dec = str(fin.get("decision", "—"))
     live = res.params.mode == core.MODE_LIVE
@@ -276,7 +282,9 @@ def header(res: core.ForecastResult, view: pd.DataFrame, horizon: int, stale: bo
              ("Площадка", f"{site.n_turbines} × {site.rated_mw:.1f} МВт" if site.rated_mw else f"{site.n_turbines} турб.", None),
              ("Погода", "Open-Meteo " + ("Previous Runs" if "previous" in src else "Forecast"), None),
              ("Модель", str(res.forecast["model_version"].iloc[0]), None),
-             ("Решение агента", f"{dec} · {'LLM' if fin.get('llm_used') else 'правила'}", DEC_LEVEL.get(dec))]
+             ("Решение агента", f"{dec} · {'LLM' if fin.get('llm_used') else 'правила'}"
+              + (f" · по выпуску {int(res.forecast['lead_hours'].max())} ч" if horizon < int(res.forecast["lead_hours"].max()) else ""),
+              DEC_LEVEL.get(dec))]
     if stale:
         items.append(("Параметры", "изменены — «Рассчитать»", "warn"))
     chips(items)
@@ -457,11 +465,7 @@ def file_stem(res: core.ForecastResult) -> str:
 
 def why_block(res: core.ForecastResult, view: pd.DataFrame) -> None:
     """«Почему такой прогноз»: показатель — значение — что это значит для выработки (из данных, без LLM)."""
-    c1, c2 = st.columns([5, 1], **_kw(st.columns, vertical_alignment="bottom"))
-    c1.markdown("**Почему такой прогноз**")
-    c2.download_button("Отчёт .md", data=res.report_md.encode("utf-8"), file_name=f"report_{file_stem(res)}.md",
-                       mime="text/markdown", key="dl_md_main", disabled=not res.report_md, help="Отчёт агента",
-                       **_stretch(st.download_button))
+    st.markdown("**Почему такой прогноз**")
     lines = core.why_lines(res, view)
     if lines:
         body = "".join(f'<div class="wa-why-k">{esc(k)}</div><div class="wa-why-v">{esc(v)}</div><div class="wa-why-m">{esc(m)}</div>'
@@ -896,6 +900,7 @@ def request_study() -> None:
 
 def back_to_nurly() -> None:
     st.session_state["active_study"] = None
+    st.session_state["workspace"] = "Оператор"
 
 
 def map_block(study: dict | None) -> None:
@@ -1147,13 +1152,105 @@ def study_section(study: dict) -> None:
         pass
 
 
+
+# ---------------------------------------------------------------- карточка агента (герой панели) и диалог
+CARD_H = 318
+CHAT_KEEP = 6
+
+
+def _card_payload(res: core.ForecastResult | None, study: dict | None, ws: str = "") -> dict | None:
+    try:
+        if study is not None:
+            return core.study_card(study)
+        if ws == "Исследование площадки":
+            if "cand_lat" not in st.session_state:      # карточка рисуется раньше карты: тот же кандидат, что и в форме
+                cand_defaults(atlas_grid(atlas_stamp()))
+            lat, lon = float(st.session_state.get("cand_lat", 47.0)), float(st.session_state.get("cand_lon", 52.0))
+            return core.idle_study_card(lat, lon, int(st.session_state.get("cand_n", 10)),
+                                        float(st.session_state.get("cand_mw", 2.5)), core.nearest_cell(lat, lon),
+                                        core.in_kz(lat, lon))
+        if res is not None:
+            return core.forecast_card(res)
+    except Exception:  # noqa: BLE001 — карточка не должна ронять панель
+        return None
+    return None
+
+
+def _card_html(payload: dict) -> str:
+    """HTML карточки: печать и лента — один раз на новый результат в сессии (ключ — хэш данных); тот же ключ →
+    та же строка HTML, iframe не перезагружается при перезапусках Streamlit."""
+    import secrets
+    nonce = st.session_state.setdefault("_card_nonce", secrets.token_hex(4))
+    key = core._card_key(payload)
+    cache = st.session_state.setdefault("_card_cache", {})
+    if key not in cache:
+        intro = not st.session_state.get("_card_intro_done")
+        st.session_state["_card_intro_done"] = True
+        cache[key] = core.agent_card_html(payload, animate=True, intro=intro, nonce=nonce, height=CARD_H)
+        if len(cache) > 6:
+            cache.pop(next(iter(cache)))
+    return cache[key]
+
+
+def chat_context_key(res: core.ForecastResult | None, study: dict | None, horizon: int = 48) -> str:
+    if study is not None:
+        return "study:" + repr(study["params"].key())
+    return "fc:" + (repr(res.params.run_key()) if res is not None else "—") + f":{horizon}"
+
+
+def agent_chat(res: core.ForecastResult | None, study: dict | None, horizon: int = 48) -> None:
+    """Диалог с агентом: история (не больше 6 реплик) над полем ввода; ответ — core.ask_agent."""
+    chats = st.session_state.setdefault("agent_chat", {})
+    ck = chat_context_key(res, study, horizon)
+    hist = chats.setdefault(ck, [])
+    box = st.container()
+    q = st.chat_input("Вопрос агенту о прогнозе или площадке", key="agent_q")
+    with box:
+        for h in hist[-CHAT_KEEP:]:
+            with st.chat_message(h["role"]):
+                st.markdown(h["content"])
+                if h.get("meta"):
+                    st.markdown(f'<div class="wa-tech" style="margin:0">{esc(h["meta"])}</div>', unsafe_allow_html=True)
+        if q:
+            with st.chat_message("user"):
+                st.markdown(q)
+            with st.chat_message("assistant"):
+                with st.spinner("Агент сверяется с данными"):
+                    try:
+                        out = core.ask_agent(q, res, study, hist, horizon=horizon)
+                    except Exception as e:  # noqa: BLE001
+                        out = {"answer": f"Ответ не получен: {type(e).__name__}", "llm_used": False, "fact_check": None}
+                st.markdown(out["answer"])
+                fc = out.get("fact_check") or {}
+                meta = [f"LLM {out.get('model') or core.llm_model_name()}" if out.get("llm_used") else "правила"]
+                if fc.get("checked"):
+                    meta.append(f"проверено чисел {fc['checked']}, не подтверждено {len(fc.get('unverified') or [])}")
+                if fc.get("note"):
+                    meta.append(str(fc["note"]))
+                meta_txt = " · ".join(meta)
+                st.markdown(f'<div class="wa-tech" style="margin:0">{esc(meta_txt)}</div>', unsafe_allow_html=True)
+            hist += [{"role": "user", "content": q}, {"role": "assistant", "content": out["answer"], "meta": meta_txt}]
+            del hist[:-CHAT_KEEP]
+
+
+def hero_card(res: core.ForecastResult | None, study: dict | None, horizon: int = 48, ws: str = "") -> None:
+    """Агент — главный герой панели: визуал, ход мыслей, решение, сообщение с печатью и диалог — над обоими
+    рабочими пространствами; содержание — по контексту (выпуск «Нурлы» или площадка)."""
+    payload = _card_payload(res, study, ws)
+    with st.container(border=False, **_kw(st.container, key="wa_hero")):
+        if payload is not None and components is not None and hasattr(components, "html"):
+            components.html(_card_html(payload), height=CARD_H, scrolling=False)
+        elif payload is not None and hasattr(st, "iframe"):
+            st.iframe(_card_html(payload), height=CARD_H)
+        agent_chat(res, study, horizon)
+
 # ---------------------------------------------------------------- страница
 def show_error(err) -> None:
     st.error(err[0])
 
 
-def page_header(res: core.ForecastResult | None, study: dict | None) -> None:
-    name = study["params"].label if study else "ВЭС «Нурлы»"
+def page_header(res: core.ForecastResult | None, study: dict | None, ws: str = "") -> None:
+    name = study["params"].label if study else ("исследование площадки" if ws == "Исследование площадки" else "ВЭС «Нурлы»")
     st.title(f"WindAgent · {name}")
     be = core.backend()
     missing = [n for n, ok in (("атлас", be["atlas"]), ("оценка", be["assess"]), ("3D", be["vizdata"])) if not ok]
@@ -1169,6 +1266,115 @@ def page_header(res: core.ForecastResult | None, study: dict | None) -> None:
     chips(items)
 
 
+WS_OPER, WS_STUDY = "Оператор", "Исследование площадки"
+
+
+def workspace_switch() -> str:
+    """Верхний переключатель рабочих пространств: «Оператор» (выпуск «Нурлы») и «Исследование площадки»."""
+    st.session_state.setdefault("workspace", WS_OPER)
+    seg = getattr(st, "segmented_control", None)
+    if seg is not None:
+        val = seg("Рабочее пространство", [WS_OPER, WS_STUDY], key="workspace",
+                  **_kw(seg, required=True, label_visibility="collapsed", width="stretch"))
+    else:
+        val = st.radio("Рабочее пространство", [WS_OPER, WS_STUDY], key="workspace", horizontal=True,
+                       **_kw(st.radio, label_visibility="collapsed"))
+    return val or WS_OPER
+
+
+def changes_block(res: core.ForecastResult, view: pd.DataFrame, a: dict) -> None:
+    """Изменения к прошлому выпуску на общих часах выбранного горизонта: энергия, MAE, смещение, наибольшее изменение."""
+    p = res.previous
+    sel = main_series(res)
+    if p is None or p.empty or sel not in set(p["turbine"]):
+        return
+    cur = view[view["turbine"] == sel][["target_time_utc", "time_local", "p50"]]
+    j = cur.merge(p[p["turbine"] == sel][["target_time_utc", "p50"]], on="target_time_utc", suffixes=("", "_prev"))
+    if j.empty:
+        return
+    cap = res.site.capacity_mw(sel) or 1.0
+    unit = "МВт·ч" if res.site.capacity_mw(sel) else "ч.н."
+    e = j["p50"] - j["p50_prev"]
+    i = int(e.abs().to_numpy().argmax())
+    rev = (a.get("revision") or {}).get(sel) or {}
+    sig = rev.get("mae", 0) > core.REVISION_MAE_THRESHOLD
+    st.markdown(f"**Изменения к выпуску {esc(res.previous_issue)}**")
+    chips([("Общих часов", str(len(j)), None),
+           ("Энергия", f"{float(j['p50'].sum() - j['p50_prev'].sum()) * cap:+.1f} {unit}", None),
+           ("MAE", f"{rev.get('mae', float(e.abs().mean())):.2f} доли ном. · порог {core.REVISION_MAE_THRESHOLD:.2f}",
+            "warn" if sig else None),
+           ("Смещение", f"{rev.get('bias', float(e.mean())):+.2f} доли ном.", None),
+           ("Наибольшее", f"{float(e.iloc[i]) * cap:+.2f} {'МВт' if unit == 'МВт·ч' else 'доли ном.'} · "
+                          f"{pd.Timestamp(j['time_local'].iloc[i]):%d.%m %H:%M}", None)])
+
+
+def actions_row(res: core.ForecastResult, view: pd.DataFrame, horizon: int) -> None:
+    stem = file_stem(res)
+    c1, c2, _ = st.columns([1, 1, 3])
+    c1.download_button("Экспорт CSV", data=core.forecast_csv(view), file_name=f"forecast_{stem}_{horizon}h.csv",
+                       mime="text/csv", key="act_csv", help="Контракт FORECAST_COLUMNS", **_stretch(st.download_button))
+    c2.download_button("Отчёт .md", data=res.report_md.encode("utf-8"), file_name=f"report_{stem}.md",
+                       mime="text/markdown", key="act_md", disabled=not res.report_md, **_stretch(st.download_button))
+
+
+def operator_space(res: core.ForecastResult | None, params: core.ForecastParams) -> None:
+    """«Оператор»: актуальность выпуска, риски, KPI, веер, объяснение, изменения к D−1, действия, 3D-сцена, вкладки."""
+    err = st.session_state.get("error")
+    if res is None:
+        if err:
+            show_error(err)
+        return
+    h = params.horizon
+    view = res.view(h)
+    a = core.horizon_analysis(res, h)
+    st.markdown("#### ВЭС «Нурлы» · прогноз выработки")
+    header(res, view, h, stale=res.params.run_key() != params.run_key(), analysis=a)
+    if err:
+        show_error(err)
+    toast = st.session_state.pop("toast", None)
+    if toast and _toast:
+        _toast(toast)
+    rows = core.alert_rows(res, view, False, analysis=a)
+    n_att = sum(r["level"] in ("warning", "error") for r in rows)
+    st.markdown(f"**Риски и предупреждения · {h} ч**" + (f" · требуют внимания: {n_att}" if n_att else ""))
+    tab_alerts(rows)
+    kpis(res, view, h)
+    unit = main_chart(res, view, f"Парк · P10–P90, {h} ч")
+    why_block(res, view)
+    changes_block(res, view, a)
+    actions_row(res, view, h)
+    with st.expander("3D-сцена ВЭС «Нурлы»", **_kw(st.expander, key="nurly_scene_exp")):
+        scene_block(res, None)
+    # key + on_change="rerun": активная вкладка хранится в session_state и не сбрасывается при перезапусках
+    tabs = st.tabs(["Таблицы и выгрузка", "Тестовый период", "Факт и точность", "Журнал агента"],
+                   **_kw(st.tabs, key="main_tabs", on_change="rerun"))
+    with tabs[0]:
+        tab_tables(res, view, h, unit)
+    with tabs[1]:
+        tab_test_period(res, unit)
+    with tabs[2]:
+        tab_fact(res)
+    with tabs[3]:
+        tab_agent(res)
+
+
+def study_space(res: core.ForecastResult | None, study: dict | None, req) -> None:
+    """«Исследование площадки»: 3D-сцена площадки и карта атласа с формой, ход исследования, результаты."""
+    left, right = st.columns([3, 2], gap="medium")
+    with left:
+        scene_block(res, study)
+    with right:
+        map_block(study)
+    if req is not None:
+        # Ход исследования — под сценой и картой; готовый результат — перезапуском: карточка агента и 3D-сцена
+        # уже новой площадки. Если исследование упало целиком — статус с ошибкой остаётся.
+        run_study(req)
+        if st.session_state.get("active_study") == req.key():
+            st.rerun()
+    if study:
+        study_section(study)
+
+
 def main() -> None:
     params, run = sidebar()
     run = run or bool(st.session_state.pop("_run_now", False))
@@ -1179,56 +1385,14 @@ def main() -> None:
     req = st.session_state.pop("_study_req", None)
     studies = st.session_state.setdefault("studies", {})
     study = studies.get(st.session_state.get("active_study")) if st.session_state.get("active_study") else None
-    page_header(res, study)
-    left, right = st.columns([3, 2], gap="medium")
-    with left:
-        scene_block(res, study)
-    with right:
-        map_block(study)
-    if req is not None:
-        # Ход исследования — под сценой и картой (они остаются на экране); готовый результат — перезапуском:
-        # шапка и 3D-сцена сверху уже новой площадки. Если исследование упало целиком — статус с ошибкой остаётся.
-        run_study(req)
-        if st.session_state.get("active_study") == req.key():
-            st.rerun()
+    ws = st.session_state.get("workspace") or WS_OPER
+    page_header(res, study if ws == WS_STUDY else None, ws)
+    ws = workspace_switch()
+    hero_card(res, study if ws == WS_STUDY else None, params.horizon, ws)
+    if ws == WS_STUDY:
+        study_space(res, study, req)
+    else:
+        operator_space(res, params)
 
-    err = st.session_state.get("error")
-    if res is None:
-        if err:
-            show_error(err)
-        if study:
-            study_section(study)
-        return
-
-    view = res.view(params.horizon)
-    if study:                                  # исследованная площадка — сразу под сценой и картой
-        study_section(study)
-    st.markdown("#### ВЭС «Нурлы» · прогноз выработки")
-    header(res, view, params.horizon, stale=res.params.run_key() != params.run_key())
-    if err:
-        show_error(err)
-    toast = st.session_state.pop("toast", None)
-    if toast and _toast:
-        _toast(toast)
-
-    kpis(res, view, params.horizon)
-    unit = main_chart(res, view, f"Парк · P10–P90, {params.horizon} ч")
-    why_block(res, view)
-
-    rows = core.alert_rows(res, view, False)
-    n_att = sum(r["level"] in ("warning", "error") for r in rows)
-    # key + on_change="rerun": активная вкладка хранится в session_state и не сбрасывается при перезапусках
-    tabs = st.tabs([f"Предупреждения ({n_att})", "Тестовый период", "Таблицы и выгрузка", "Агент", "Факт и точность"],
-                   **_kw(st.tabs, key="main_tabs", on_change="rerun"))
-    with tabs[0]:
-        tab_alerts(rows)
-    with tabs[1]:
-        tab_test_period(res, unit)
-    with tabs[2]:
-        tab_tables(res, view, params.horizon, unit)
-    with tabs[3]:
-        tab_agent(res)
-    with tabs[4]:
-        tab_fact(res)
 
 main()

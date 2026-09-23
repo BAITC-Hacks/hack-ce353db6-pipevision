@@ -63,6 +63,41 @@ def test_app_renders_offline():
     at = AppTest.from_file(str(UI / "app.py"), default_timeout=120).run()
     assert not at.exception, [e.message for e in at.exception]
     assert at.title and "Нурлы" in at.title[0].value
+    assert "result" in at.session_state and isinstance(at.session_state["result"].forecast, pd.DataFrame)
+    assert at.session_state["workspace"] == "Оператор" and at.chat_input      # карточка агента с диалогом наверху
+    at.session_state["workspace"] = "Исследование площадки"                  # второе рабочее пространство: карта и форма
+    at.run()
+    assert not at.exception, [e.message for e in at.exception]
     labels = [b.label for b in at.button]
     assert "Исследовать площадку" in labels and "Вернуться к «Нурлы»" in labels
-    assert "result" in at.session_state and isinstance(at.session_state["result"].forecast, pd.DataFrame)
+
+
+@pytest.fixture(scope="module")
+def nurly_result():
+    """Выпуск «Нурлы» 10.02.2026 из кэша Open-Meteo, без LLM."""
+    return core.run_forecast(core.ForecastParams())
+
+
+def test_ask_agent_rules_without_key(monkeypatch, nurly_result):
+    """Без ключа OpenAI агент отвечает по правилам: энергия за 48 ч — числом из анализа, числа проходят сверку."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    out = core.ask_agent("Сколько энергии выработает парк за 48 ч?", nurly_result)
+    m = nurly_result.analysis["metrics"]["farm"]
+    assert out["llm_used"] is False
+    assert str(m["energy_48h_mwh"]) in out["answer"] and "МВт·ч" in out["answer"]
+    assert out["fact_check"]["checked"] > 0 and not out["fact_check"]["unverified"]
+    other = core.ask_agent("Расскажи анекдот", nurly_result)
+    assert "ключ OpenAI" in other["answer"]
+
+
+def test_agent_card_html_forecast_and_study(nurly_result):
+    """HTML карточки агента строится для выпуска и для исследования площадки; данные подставлены вместо метки."""
+    htm = core.agent_card_html(core.forecast_card(nurly_result), animate=True, intro=True, nonce="t")
+    assert "Агент WindAgent" in htm and core.CARD_DATA_MARK not in htm and "fetch_weather" in htm
+    study = {"params": core.StudyParams(47.0, 52.0, name="Атырау-1"), "assessment": None, "forecast_result": nurly_result,
+             "viz_html": None, "report": {"markdown": "# Оценка\n\n## Резюме\n\nПлощадка **перспективная**.\n\n## Площадка\n\nx",
+                                          "llm_used": False, "fact_check": {"checked": 3, "unverified": []}},
+             "errors": {core.STUDY_STEPS[1]: "RuntimeError: нет сети"}, "skipped": [], "timings": {}}
+    card = core.study_card(study)
+    assert [s["status"] for s in card["steps"]][:2] == ["ok", "error"] and card["message"] == "Площадка перспективная."
+    assert core.CARD_DATA_MARK not in core.agent_card_html(card, animate=False)
