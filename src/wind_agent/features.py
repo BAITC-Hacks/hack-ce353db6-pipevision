@@ -46,7 +46,9 @@ def make_features(df: pd.DataFrame) -> pd.DataFrame:
     x["hour_sin"], x["hour_cos"] = np.sin(2 * np.pi * local.hour / 24), np.cos(2 * np.pi * local.hour / 24)
     x["doy_sin"], x["doy_cos"] = np.sin(2 * np.pi * local.dayofyear / 365.25), np.cos(2 * np.pi * local.dayofyear / 365.25)
     x["lead_day"] = df["lead_day"].astype(int)
-    x["turbine_id"] = df["turbine"].map({k: i for i, k in enumerate(config.TURBINES)}).astype(int) if "turbine" in df else 0
+    # номер турбины: t1/t2 площадки «Нурлы»; для чужой площадки — TRANSFER_TURBINE_ID (перенос кривой мощности)
+    idx = {k: i for i, k in enumerate(config.TURBINES)}
+    x["turbine_id"] = df["turbine"].map(lambda k: idx.get(k, config.TRANSFER_TURBINE_ID)).astype(int) if "turbine" in df else 0
     # ансамбль моделей погоды: если колонки модели нет (недоступна) — подставляем best_match, чтобы прогноз не падал
     members = []
     for m in config.ENSEMBLE_MODELS:

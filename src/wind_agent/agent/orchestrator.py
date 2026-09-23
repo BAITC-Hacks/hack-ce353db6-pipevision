@@ -31,6 +31,7 @@ RECALC_CODES = {"input_quality", "range_violation", "quantile_order", "incomplet
 FORECASTS_DIR = config.OUTPUTS_DIR / "forecasts"
 REPORTS_DIR = config.OUTPUTS_DIR / "reports"
 LIVE_DIR = config.OUTPUTS_DIR / "live"
+ADHOC_DIR = config.OUTPUTS_DIR / "adhoc"      # прогнозы для других площадок / нестандартного часа выпуска
 AGENT_LOG = config.OUTPUTS_DIR / "agent_log.jsonl"
 REPLAY_SUMMARY = config.OUTPUTS_DIR / "replay_summary.csv"
 LATEST_BY_TARGET = FORECASTS_DIR / "latest_by_target.csv"
@@ -52,10 +53,16 @@ class AgentSession:
     """Состояние одного выпуска прогноза и журнал шагов агента."""
 
     def __init__(self, wx, issue_date: str | None = None, live: bool = False, previous: pd.DataFrame | None = None,
-                 now: pd.Timestamp | None = None, out_name: str | None = None):
+                 now: pd.Timestamp | None = None, out_name: str | None = None, site: config.Site | None = None,
+                 issue_hour: int | None = None):
         self.wx, self.issue_date, self.live, self.previous = wx, issue_date, live, previous
         self.now = now if now is not None else (pd.Timestamp.now(tz="UTC") if live else None)
         self.out_name = out_name
+        self.site = site or config.NURLY
+        self.issue_hour = config.ISSUE_HOUR_LOCAL if issue_hour is None else int(issue_hour)
+        # протокол ТЗ (файлы outputs/forecasts и outputs/reports) — только ВЭС «Нурлы» с выпуском в 23:00;
+        # другие площадки и часы выпуска пишутся в outputs/adhoc/<площадка>/, чтобы не смешивать с тестовым прогоном
+        self.protocol = self.site.has_history and self.issue_hour == config.ISSUE_HOUR_LOCAL
         self.state: dict = {}
         self.trace: list[dict] = []
         self.recalc: dict | None = None
@@ -106,7 +113,7 @@ class AgentSession:
 
     # ------------------------------------------------------------ инструменты
     def _fetch_weather(self, by_llm: bool = False):
-        w = tools.fetch_weather(self.wx, self.issue_date, live=self.live, now=self.now)
+        w = tools.fetch_weather(self.wx, self.issue_date, live=self.live, now=self.now, site=self.site, issue_hour=self.issue_hour)
         for k in ("prepared", "forecast", "analysis"):
             self.state.pop(k, None)
         self.state["weather"] = w
@@ -138,7 +145,8 @@ class AgentSession:
     def _analyze_forecast(self, by_llm: bool = False):
         self._ensure("analyze_forecast", by_llm)
         p = self.state["prepared"]
-        a = tools.analyze_forecast(self.state["forecast"], self.previous, tools.load_history(), notes=p["notes"], info=p["info"])
+        history = tools.load_history() if self.site.has_history else None
+        a = tools.analyze_forecast(self.state["forecast"], self.previous, history, notes=p["notes"], info=p["info"], site=self.site)
         self.state["analysis"] = a
         f = a["metrics"]["farm"]
         rev = a["revision"]["farm"]["mae"] if a["revision"] else None
@@ -152,7 +160,7 @@ class AgentSession:
         if "forecast" not in self.state:
             self._ensure("analyze_forecast", by_llm)
         old_w, old_fc = self.state["weather"], self.state["forecast"]
-        new_w = tools.fetch_weather(self.wx, self.issue_date, live=self.live, now=self.now)
+        new_w = tools.fetch_weather(self.wx, self.issue_date, live=self.live, now=self.now, site=self.site, issue_hour=self.issue_hour)
         new_p = tools.prepare_data(new_w)
         new_fc = tools.run_model(new_p)
         changed = new_w["meta"]["input_hash"] != old_w["meta"]["input_hash"]
@@ -218,12 +226,19 @@ class AgentSession:
         dec = {"decision": clean["decision"], "reasoning": clean["reasoning"], "llm_used": by_llm, "model": self.llm_model or "",
                "rules_decision": rules_decision, "recalc": self.recalc, "fact_check": fact}
         if self.live:
-            csv_path = tools.save_forecast(self.issue_date, fc, out_dir=LIVE_DIR, name=self.out_name)
+            out_dir = LIVE_DIR if self.site.has_history else LIVE_DIR / self.site.key
+            csv_path = tools.save_forecast(self.issue_date, fc, out_dir=out_dir, name=self.out_name)
             md_path = tools.write_report(self.issue_date, fc, a, narrative, meta=meta, decision=dec,
-                                         trace=self.trace, out_dir=LIVE_DIR, name=self.out_name)
-        else:
+                                         trace=self.trace, out_dir=out_dir, name=self.out_name)
+        elif self.protocol:
             csv_path = tools.save_forecast(self.issue_date, fc)
             md_path = tools.write_report(self.issue_date, fc, a, narrative, meta=meta, decision=dec, trace=self.trace)
+        else:   # другая площадка или нестандартный час выпуска — отдельная папка, протокольные файлы не трогаем
+            out_dir = ADHOC_DIR / self.site.key
+            name = self.out_name or f"{self.issue_date}T{self.issue_hour:02d}"
+            csv_path = tools.save_forecast(self.issue_date, fc, out_dir=out_dir, name=name)
+            md_path = tools.write_report(self.issue_date, fc, a, narrative, meta=meta, decision=dec,
+                                         trace=self.trace, out_dir=out_dir, name=name)
         self.final = dict(dec, narrative=narrative, csv=str(csv_path), report=str(md_path))
         rel = lambda p: str(Path(p).relative_to(config.ROOT)) if str(p).startswith(str(config.ROOT)) else str(p)  # noqa: E731
         return (f"решение {clean['decision']} ({'LLM' if by_llm else 'правила'}); {rel(md_path)}, {rel(csv_path)}",
@@ -260,19 +275,28 @@ def _llm_context(session: AgentSession) -> str:
         head = (f"Режим: live (оперативный прогноз). Текущее время UTC: {session.now:%Y-%m-%d %H:%M}. "
                 "Прогноз на 48 часов вперёд по последнему запуску Open-Meteo.")
     else:
-        d = pd.Timestamp(session.issue_date)
-        head = (f"Режим: replay (ретроспективный прогон). Дата выпуска: {session.issue_date}, выпуск в 23:00 местного времени "
-                f"(UTC+5), прогноз на {d + pd.Timedelta(days=1):%Y-%m-%d} и {d + pd.Timedelta(days=2):%Y-%m-%d} "
-                "по архивным прогнозам погоды, доступным на момент выпуска.")
+        head = (f"Режим: replay (ретроспективный прогон). Дата выпуска: {session.issue_date}, выпуск в {session.issue_hour:02d}:00 "
+                "местного времени (UTC+5), прогноз на следующие 48 часов по архивным прогнозам погоды, доступным на момент выпуска.")
+    s = session.site
+    site_txt = (f"Площадка: {s.name}; турбины: {', '.join(s.turbines)}"
+                + (f"; {s.n_turbines} × {s.rated_mw} МВт" if s.rated_mw and s.n_turbines else "")
+                + (". ВНИМАНИЕ: истории SCADA у площадки нет, прогноз — перенос модели ВЭС «Нурлы», об этом нужно сказать в отчёте."
+                   if s.transfer else "."))
     prev = (f"Предыдущий выпуск для анализа ревизии: {session.previous['issue_date'].iloc[0]}."
             if session.previous is not None else "Предыдущего выпуска для сравнения нет.")
-    return f"{head} {prev} Выполни полный цикл агента и заверши его вызовом write_report."
+    return f"{head} {site_txt} {prev} Выполни полный цикл агента и заверши его вызовом write_report."
 
 
 def run_cycle(wx, llm_state: LLMState, issue_date: str | None = None, live: bool = False,
-              previous: pd.DataFrame | None = None, out_name: str | None = None, now: pd.Timestamp | None = None) -> AgentSession:
-    """Один выпуск прогноза: LLM-цикл (если доступна) с доведением по правилам при сбое/исчерпании шагов."""
-    session = AgentSession(wx, issue_date=issue_date, live=live, previous=previous, now=now, out_name=out_name)
+              previous: pd.DataFrame | None = None, out_name: str | None = None, now: pd.Timestamp | None = None,
+              site: config.Site | None = None, issue_hour: int | None = None) -> AgentSession:
+    """Один выпуск прогноза: LLM-цикл (если доступна) с доведением по правилам при сбое/исчерпании шагов.
+
+    site — площадка (по умолчанию ВЭС «Нурлы»; для произвольных координат — config.custom_site(...)),
+    issue_hour — час выпуска местного времени (по умолчанию 23, протокол ТЗ).
+    """
+    session = AgentSession(wx, issue_date=issue_date, live=live, previous=previous, now=now, out_name=out_name,
+                           site=site, issue_hour=issue_hour)
     if llm_state.enabled:
         session.llm_model = llm_state.settings["model"]
         try:
@@ -362,25 +386,34 @@ def _init_llm(use_llm: bool) -> LLMState:
     return LLMState(settings=settings)
 
 
-def run_replay(wx, start: str = config.TEST_ISSUE_START, end: str = config.TEST_ISSUE_END, use_llm: bool = True) -> pd.DataFrame:
-    """Ежедневные выпуски start..end (местные даты): полный цикл агента на каждую дату, csv + md + журнал + сводка."""
+def run_replay(wx, start: str = config.TEST_ISSUE_START, end: str = config.TEST_ISSUE_END, use_llm: bool = True,
+               site: config.Site | None = None, issue_hour: int | None = None) -> pd.DataFrame:
+    """Ежедневные выпуски start..end (местные даты): полный цикл агента на каждую дату, csv + md + журнал + сводка.
+
+    Для ВЭС «Нурлы» с выпуском в 23:00 (протокол ТЗ) файлы идут в outputs/forecasts и outputs/reports;
+    другая площадка или час выпуска — в outputs/adhoc/<площадка>/ (журнал и сводка протокола не трогаются).
+    """
     t_run = time.perf_counter()
     run_ts = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%dT%H:%M:%SZ")
+    site = site or config.NURLY
+    protocol = site.has_history and (issue_hour is None or int(issue_hour) == config.ISSUE_HOUR_LOCAL)
     llm_state = _init_llm(use_llm)
-    try:
-        wx.prefetch()
-    except Exception as e:  # noqa: BLE001 — без префетча попробуем по датам
-        log.warning("prefetch не выполнен (%s) — продолжаю по датам", e)
+    if protocol:
+        try:
+            wx.prefetch()
+        except Exception as e:  # noqa: BLE001 — без префетча попробуем по датам
+            log.warning("prefetch не выполнен (%s) — продолжаю по датам", e)
     dates = [d.strftime("%Y-%m-%d") for d in pd.date_range(start, end, freq="D")]
-    log.info("Replay: %d выпусков %s..%s", len(dates), dates[0], dates[-1])
+    log.info("Replay: %d выпусков %s..%s, площадка %s, выпуск в %02d:00%s", len(dates), dates[0], dates[-1], site.name,
+             config.ISSUE_HOUR_LOCAL if issue_hour is None else int(issue_hour), "" if protocol else " (вне протокола → outputs/adhoc)")
     rows, entries, done, prev_mem = [], [], set(), {}
     for d in dates:
         prev_date = (pd.Timestamp(d) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
         previous = prev_mem.get(prev_date)
-        if previous is None:
+        if previous is None and protocol:
             previous = _read_forecast(FORECASTS_DIR / f"{prev_date}.csv")
         try:
-            s = run_cycle(wx, llm_state, issue_date=d, previous=previous)
+            s = run_cycle(wx, llm_state, issue_date=d, previous=previous, site=site, issue_hour=issue_hour)
         except Exception as e:  # noqa: BLE001 — одна дата не должна ронять весь прогон
             log.error("%s | ошибка цикла: %s", d, e)
             rows.append({"issue_date": d, "status": "error", "flags": f"error: {e}"[:200], "llm_used": False})
@@ -395,11 +428,16 @@ def run_replay(wx, start: str = config.TEST_ISSUE_START, end: str = config.TEST_
                  d, row["farm_energy_48h"], row["farm_energy_day1"], row["farm_energy_day2"], row["mean_p50"], rev,
                  row["status"], row["decision"], "да" if row["llm_used"] else "нет", row["flags"] or "без флагов")
 
-    _upsert_log(entries, replace_dates=done, mode="replay")
     summary = pd.DataFrame(rows)
     cols = ["issue_date", "farm_energy_48h", "farm_energy_day1", "farm_energy_day2", "mean_p50", "revision_mae",
             "flags", "status", "llm_used", "api_calls", "decision"]
     summary = summary.reindex(columns=cols)
+    if not protocol:   # вне протокола: журнал с пометкой adhoc, сводка и latest_by_target протокола не меняются
+        _upsert_log(entries, mode="adhoc")
+        log.info("Replay (adhoc) завершён за %.1f с: выпусков %d, файлы в %s", time.perf_counter() - t_run, len(summary),
+                 (ADHOC_DIR / site.key).relative_to(config.ROOT))
+        return summary
+    _upsert_log(entries, replace_dates=done, mode="replay")
     if REPLAY_SUMMARY.exists():
         old = pd.read_csv(REPLAY_SUMMARY)
         old = old[~old["issue_date"].isin(summary["issue_date"])]
@@ -416,25 +454,37 @@ def run_replay(wx, start: str = config.TEST_ISSUE_START, end: str = config.TEST_
              "существенных ревизий %d, LLM-выпусков %d, запросов к API %d → %s, %s",
              time.perf_counter() - t_run, len(ok), len(summary) - len(ok), ok["farm_energy_48h"].mean() if len(ok) else float("nan"),
              n_rev, int(ok["llm_used"].sum()) if len(ok) else 0, int(ok["api_calls"].sum()) if len(ok) else 0,
-             REPLAY_SUMMARY.relative_to(config.ROOT), LATEST_BY_TARGET.relative_to(config.ROOT))
+             _rel(REPLAY_SUMMARY), _rel(LATEST_BY_TARGET))
     return summary
 
 
-def run_live(wx, use_llm: bool = True) -> AgentSession | None:
-    """Оперативный прогноз на 48 ч от текущего момента: outputs/live/<UTC timestamp>.csv и .md."""
+def _rel(p: Path | str) -> str:
+    """Путь относительно корня проекта (или как есть, если он снаружи — например, в тестах)."""
+    p = Path(p)
+    try:
+        return str(p.relative_to(config.ROOT))
+    except ValueError:
+        return str(p)
+
+
+def run_live(wx, use_llm: bool = True, site: config.Site | None = None) -> AgentSession | None:
+    """Оперативный прогноз на 48 ч от текущего момента: outputs/live/<UTC timestamp>.csv и .md
+    (для другой площадки — outputs/live/<площадка>/)."""
     t_run = time.perf_counter()
     if wx.offline:
         log.error("live требует доступа к Open-Meteo Forecast API: оперативный прогноз не кэшируется, запустите без --offline "
                   "(для офлайн-проверки используйте replay)")
         return None
+    site = site or config.NURLY
     llm_state = _init_llm(use_llm)
     now = pd.Timestamp.now(tz="UTC")
     name = (now.floor("h")).strftime("%Y%m%dT%H%MZ")
-    LIVE_DIR.mkdir(parents=True, exist_ok=True)
-    prev_files = sorted(p for p in LIVE_DIR.glob("*Z.csv") if p.stem != name)
+    live_dir = LIVE_DIR if site.has_history else LIVE_DIR / site.key
+    live_dir.mkdir(parents=True, exist_ok=True)
+    prev_files = sorted(p for p in live_dir.glob("*Z.csv") if p.stem != name)
     previous = pd.read_csv(prev_files[-1]) if prev_files else None
     try:
-        s = run_cycle(wx, llm_state, live=True, previous=previous, out_name=name, now=now)
+        s = run_cycle(wx, llm_state, live=True, previous=previous, out_name=name, now=now, site=site)
     except Exception as e:  # noqa: BLE001
         log.error("live: ошибка цикла агента: %s", e)
         return None
@@ -442,5 +492,5 @@ def run_live(wx, use_llm: bool = True) -> AgentSession | None:
     row = _summary_row(s)
     log.info("Live %s | парк %.1f ч.н. за 48 ч (первые сутки %.1f, вторые %.1f) | P50 ср. %.2f | %s | %s | LLM %s | %.1f с → %s",
              name, row["farm_energy_48h"], row["farm_energy_day1"], row["farm_energy_day2"], row["mean_p50"], row["status"],
-             row["decision"], "да" if row["llm_used"] else "нет", time.perf_counter() - t_run, Path(s.final["report"]).relative_to(config.ROOT))
+             row["decision"], "да" if row["llm_used"] else "нет", time.perf_counter() - t_run, _rel(s.final["report"]))
     return s

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -32,6 +33,41 @@ TURBINES: dict[str, tuple[float, float]] = {
     "t2": (43.643198, 78.538828),
 }
 RAW_FILES = {"t1": DATA_RAW / "turbine_1.csv", "t2": DATA_RAW / "turbine_2.csv"}
+
+
+@dataclass(frozen=True)
+class Site:
+    """Площадка ВЭС: координаты турбин и паспорт. Модель обучена на ВЭС «Нурлы» (has_history=True);
+    для любой другой площадки прогноз строится переносом этой модели (обобщённая кривая мощности, точность ниже)."""
+    key: str                                   # идентификатор для файлов и кэша (без пробелов)
+    name: str
+    turbines: dict = field(default_factory=dict)   # {ключ турбины: (широта, долгота)}
+    rated_mw: float | None = None              # номинальная мощность одной турбины, МВт (для вывода в МВт·ч)
+    n_turbines: int | None = None              # число турбин площадки (у «Нурлы» в данных две)
+    has_history: bool = False                  # есть SCADA-история → модель обучена на этой площадке
+
+    @property
+    def series(self) -> list[str]:
+        return list(self.turbines) + ["farm"]
+
+    @property
+    def transfer(self) -> bool:
+        """Прогноз переносом модели (без истории площадки)."""
+        return not self.has_history
+
+
+NURLY = Site("nurly", "ВЭС «Нурлы» (Енбекшиказахский район)", TURBINES, rated_mw=2.5, n_turbines=2, has_history=True)
+TRANSFER_TURBINE_ID = 0    # признак turbine_id для «чужой» площадки — кривая мощности турбины 1
+
+
+def custom_site(lat: float, lon: float, n_turbines: int = 1, rated_mw: float | None = None, name: str | None = None) -> Site:
+    """Произвольная площадка по координатам: одна виртуальная турбина `u1` (все турбины площадки попадают
+    в одну ячейку сетки моделей погоды ~11 км), масштаб в МВт задают n_turbines × rated_mw."""
+    lat, lon = float(lat), float(lon)
+    if not (40.0 <= lat <= 56.0 and 46.0 <= lon <= 88.0):
+        raise ValueError(f"координаты {lat:.4f}, {lon:.4f} вне территории Казахстана (широта 40–56, долгота 46–88)")
+    key = f"c{lat:.3f}_{lon:.3f}".replace(".", "p").replace("-", "m")
+    return Site(key, name or f"площадка {lat:.3f}, {lon:.3f}", {"u1": (lat, lon)}, rated_mw, int(n_turbines), False)
 
 # Метки времени в датасете локальные. Казахстан перешёл на единое время UTC+5 1 марта 2024,
 # до этого Алматинская область жила по UTC+6. Подтверждено кросс-корреляцией с Open-Meteo (docs/01_analysis.md).

@@ -115,13 +115,18 @@ def load_history() -> dict:
 
 
 # ---------------------------------------------------------------- 1. погода
-def _live_window(wx, turbine: str, now: pd.Timestamp) -> pd.DataFrame:
+def series_of(site: config.Site | None) -> list[str]:
+    """Ряды прогноза площадки: ключи турбин + farm (для «Нурлы» — t1, t2, farm)."""
+    return (site or config.NURLY).series
+
+
+def _live_window(wx, turbine: str, now: pd.Timestamp, coords: tuple[float, float] | None = None) -> pd.DataFrame:
     """48 часов оперативного прогноза, начиная с ближайшего полного часа после `now` (UTC)."""
     t0 = now.floor("h") + pd.Timedelta(hours=1)
     targets = pd.date_range(t0, periods=config.HORIZON_HOURS, freq="h")
-    raw = wx.live_forecast(turbine, forecast_days=3).set_index("time").sort_index()
+    raw = wx.live_forecast(turbine, forecast_days=3, coords=coords).set_index("time").sort_index()
     if raw.index.max() < targets[-1]:
-        raw = wx.live_forecast(turbine, forecast_days=4).set_index("time").sort_index()
+        raw = wx.live_forecast(turbine, forecast_days=4, coords=coords).set_index("time").sort_index()
     df = raw.reindex(targets).reset_index(names="time")      # все колонки, включая ансамбль GFS/ICON/ECMWF
     df["target_local"] = utc_to_local(targets)
     df["lead_hours"] = np.arange(1, config.HORIZON_HOURS + 1)
@@ -130,23 +135,27 @@ def _live_window(wx, turbine: str, now: pd.Timestamp) -> pd.DataFrame:
     return df
 
 
-def fetch_weather(wx, issue_date: str | None = None, live: bool = False, now: pd.Timestamp | None = None) -> dict:
-    """Получить прогноз погоды на 48 ч для обеих турбин.
+def fetch_weather(wx, issue_date: str | None = None, live: bool = False, now: pd.Timestamp | None = None,
+                  site: config.Site | None = None, issue_hour: int | None = None) -> dict:
+    """Получить прогноз погоды на 48 ч для всех турбин площадки (по умолчанию — ВЭС «Нурлы», t1 и t2).
 
-    replay (live=False): архивный прогноз Open-Meteo Previous Runs, каким он был в 23:00 местного дня
-    `issue_date` (сутки D+1 — запуск за 1 сутки, D+2 — за 2 суток).
+    replay (live=False): архивный прогноз Open-Meteo Previous Runs, каким он был в `issue_hour` (по умолчанию 23:00)
+    местного дня `issue_date`: для целевого часа t берётся запуск с лагом ceil((t − выпуск)/24 ч) суток.
     live=True: последний оперативный запуск Open-Meteo Forecast API, часы после текущего момента.
 
-    Возвращает {'frames': {turbine: DataFrame}, 'meta': {источник, диапазон, число часов, NaN, хэш входа}}.
+    Возвращает {'frames': {turbine: DataFrame}, 'meta': {источник, площадка, диапазон, число часов, NaN, хэш входа}}.
     """
+    site = site or config.NURLY
+    issue_hour = config.ISSUE_HOUR_LOCAL if issue_hour is None else int(issue_hour)
     calls0 = wx.calls
     frames = {}
-    for t in config.TURBINES:
+    for t, coords in site.turbines.items():
+        cache_key = None if site.has_history else f"{site.key}_{t}"
         if live:
             now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
-            frames[t] = _live_window(wx, t, now)
+            frames[t] = _live_window(wx, t, now, coords=coords)
         else:
-            frames[t] = wx.archived_forecast(t, issue_date)
+            frames[t] = wx.archived_forecast(t, issue_date, coords=coords, cache_key=cache_key, issue_hour=issue_hour)
     first = frames[next(iter(frames))]
     issue_utc = pd.Timestamp(first["issue_time_utc"].iloc[0])
     if live:
@@ -154,6 +163,8 @@ def fetch_weather(wx, issue_date: str | None = None, live: bool = False, now: pd
     meta = {
         "source": SOURCE_LIVE if live else SOURCE_ARCHIVE,
         "mode": "live" if live else "replay",
+        "site": site.key, "site_name": site.name, "transfer": site.transfer,
+        "rated_mw": site.rated_mw, "n_turbines": site.n_turbines, "issue_hour": issue_hour,
         "issue_date": issue_date,
         "issue_time_utc": iso_utc([issue_utc])[0],
         "issue_time_local": iso_local([issue_utc])[0],
@@ -239,11 +250,12 @@ def run_model(prepared: dict, model: PowerModel | None = None) -> pd.DataFrame:
         for v in WEATHER_OUT:
             df[v] = w[v].astype(float).round(2).values
         parts[t] = df
-    farm = parts["t1"].copy()
+    keys = list(parts)                                   # порядок турбин площадки (t1, t2 для «Нурлы»)
+    farm = parts[keys[0]].copy()
     farm["turbine"] = "farm"
     for q in ("p10", "p50", "p90"):
-        farm[q] = np.mean([parts[t][q].values for t in config.TURBINES], axis=0)
-    out = pd.concat([parts["t1"], parts["t2"], farm], ignore_index=True)
+        farm[q] = np.mean([parts[t][q].values for t in keys], axis=0)
+    out = pd.concat([parts[t] for t in keys] + [farm], ignore_index=True)
     for q in ("p10", "p50", "p90"):
         out[q] = out[q].astype(float).round(4)
     out["weather_source"] = meta["source"]
@@ -276,7 +288,8 @@ def _hhmm(local_iso: str) -> str:
 
 
 def analyze_forecast(forecast: pd.DataFrame, previous_forecast: pd.DataFrame | None = None,
-                     history: dict | None = None, notes: list[str] | None = None, info: list[str] | None = None) -> dict:
+                     history: dict | None = None, notes: list[str] | None = None, info: list[str] | None = None,
+                     site: config.Site | None = None) -> dict:
     """Проверки и показатели прогноза: диапазоны, энергия, рампы, уверенность, климатология, ревизия.
 
     * значения в [0, 1] и P10 ≤ P50 ≤ P90;
@@ -286,8 +299,15 @@ def analyze_forecast(forecast: pd.DataFrame, previous_forecast: pd.DataFrame | N
     * ревизия: сравнение с предыдущим выпуском на общих целевых часах (MAE > 0.15 — флаг).
     Возвращает dict с показателями по t1/t2/farm, флагами и итоговым статусом ok|warning.
     """
-    history = history or load_history()
+    site = site or config.NURLY
+    series = site.series
+    # климатология есть только у площадки с историей; для чужой площадки прогноз — перенос модели «Нурлы»
+    history = history or (load_history() if site.has_history else {"by_month": {}, "range": None})
     flags: list[dict] = []
+    if site.transfer:
+        flags.append({"code": "transfer", "level": "info",
+                      "message": f"площадка «{site.name}» без истории SCADA: прогноз переносом модели ВЭС «Нурлы» "
+                                 "(обобщённая кривая мощности), ошибка выше, чем на обученной площадке"})
     for n in notes or []:
         flags.append({"code": "input_quality", "level": "warning", "message": n})
     for n in info or []:
@@ -300,7 +320,7 @@ def analyze_forecast(forecast: pd.DataFrame, previous_forecast: pd.DataFrame | N
     counts = forecast.groupby("turbine").size().to_dict()
     checks = {"values_in_0_1": out_of_range == 0, "quantiles_ordered": order_viol == 0,
               "hours_per_series": {k: int(v) for k, v in counts.items()},
-              "complete": all(counts.get(s, 0) == config.HORIZON_HOURS for s in SERIES)}
+              "complete": all(counts.get(s, 0) == config.HORIZON_HOURS for s in series)}
     if out_of_range:
         flags.append({"code": "range_violation", "level": "warning", "message": f"{out_of_range} значений вне [0, 1]"})
     if order_viol:
@@ -310,7 +330,7 @@ def analyze_forecast(forecast: pd.DataFrame, previous_forecast: pd.DataFrame | N
 
     days = sorted(forecast["target_time_local"].str[:10].unique())
     metrics = {}
-    for s in SERIES:
+    for s in series:
         d = _series(forecast, s)
         if d.empty:
             continue
@@ -318,7 +338,8 @@ def analyze_forecast(forecast: pd.DataFrame, previous_forecast: pd.DataFrame | N
         jumps = np.abs(np.diff(p50)) if len(p50) > 1 else np.array([0.0])
         i_ramp = int(np.argmax(jumps))
         months = pd.to_datetime(d["target_time_local"].str[:19]).dt.month
-        clim = float(np.mean([history["by_month"][s].get(int(m), np.nan) for m in months]))
+        hb = history["by_month"].get(s) or {}
+        clim = float(np.mean([hb.get(int(m), np.nan) for m in months])) if hb else float("nan")
         m = {
             "energy_48h": round(float(p50.sum()), 2),
             "energy_48h_p10": round(float(d["p10"].sum()), 2),
@@ -337,9 +358,14 @@ def analyze_forecast(forecast: pd.DataFrame, previous_forecast: pd.DataFrame | N
             "n_ramps_over_threshold": int((jumps > RAMP_THRESHOLD).sum()),
             "mean_band_p90_p10": round(float((d["p90"] - d["p10"]).mean()), 3),
             "mean_wind_100m": round(float(d["wind_speed_100m"].mean()), 2),
-            "climatology_mean": round(clim, 3),
-            "vs_climatology_pct": round(100 * (p50.mean() / clim - 1), 1) if clim > 0 else None,
+            "climatology_mean": round(clim, 3) if np.isfinite(clim) else None,
+            "vs_climatology_pct": round(100 * (p50.mean() / clim - 1), 1) if np.isfinite(clim) and clim > 0 else None,
         }
+        if site.rated_mw and site.n_turbines:                 # энергия в МВт·ч: часы номинала × число турбин × номинал
+            scale = site.rated_mw * (site.n_turbines if s == "farm" else 1)
+            m["energy_48h_mwh"] = round(m["energy_48h"] * scale, 1)
+            m["energy_day1_mwh"] = round(m["energy_day1"] * scale, 1)
+            m["energy_day2_mwh"] = round(m["energy_day2"] * scale, 1)
         metrics[s] = m
 
     farm = metrics.get("farm", {})
@@ -367,7 +393,7 @@ def analyze_forecast(forecast: pd.DataFrame, previous_forecast: pd.DataFrame | N
     revision = None
     if previous_forecast is not None and not previous_forecast.empty:
         revision = {"previous_issue_date": str(previous_forecast["issue_date"].iloc[0])}
-        for s in SERIES:
+        for s in series:
             cur = _series(forecast, s)
             prev = previous_forecast[previous_forecast["turbine"] == s]
             key_c = pd.to_datetime(cur["target_time_utc"], utc=True)
@@ -392,7 +418,9 @@ def analyze_forecast(forecast: pd.DataFrame, previous_forecast: pd.DataFrame | N
 
     status = "warning" if any(f["level"] == "warning" for f in flags) else "ok"
     return {"checks": checks, "metrics": metrics, "revision": revision, "flags": flags, "status": status,
-            "days": days, "climatology_range": history.get("range")}
+            "days": days, "climatology_range": history.get("range"), "series": series,
+            "site": {"key": site.key, "name": site.name, "transfer": site.transfer,
+                     "rated_mw": site.rated_mw, "n_turbines": site.n_turbines}}
 
 
 def analysis_brief(analysis: dict) -> dict:
@@ -535,9 +563,11 @@ def _allowed_numbers(analysis: dict, forecast: pd.DataFrame | None = None) -> np
             add(e1 / e2)
             add(e2 / e1)
     rev = analysis.get("revision") or {}
-    for s in SERIES:
+    for s in analysis.get("series", SERIES):
         for v in (rev.get(s) or {}).values():
             add(v)
+    for v in (analysis.get("site") or {}).values():           # номинал, число турбин площадки
+        add(v)
     flags = analysis.get("flags") or []
     add(len(flags))
     add(sum(f.get("level") == "warning" for f in flags))
@@ -630,15 +660,26 @@ def write_report(issue_date: str, forecast: pd.DataFrame, analysis: dict, narrat
     f = m["farm"]
     live = meta.get("mode") == "live"
     first = forecast.iloc[0]
+    series = analysis.get("series", SERIES)
+    site = analysis.get("site") or {}
+    issue_hour = int(meta.get("issue_hour", config.ISSUE_HOUR_LOCAL))
+    labels = {"t1": "Турбина 1", "t2": "Турбина 2", "farm": "Парк (среднее)"}
+    col_names = [labels.get(s, f"Турбина {s}") for s in series]
 
     L = [f"# {'Оперативный прогноз' if live else 'Прогноз'} выработки ВЭС — выпуск {issue_date}", ""]
+    if site.get("name"):
+        L += [f"Площадка: **{site['name']}**" + (f", {site['n_turbines']} × {site['rated_mw']} МВт" if site.get("rated_mw") and site.get("n_turbines") else ""), ""]
+    if site.get("transfer"):
+        L += ["> ⚠ **Перенос модели.** У этой площадки нет истории SCADA: применена модель, обученная на ВЭС «Нурлы» "
+              "(обобщённая кривая мощности по прогнозу ветра). Ошибка выше, чем на обученной площадке; для точного "
+              "прогноза нужна история выработки площадки.", ""]
     if live:
         L += ["> **Оперативный прогноз** по последнему запуску Open-Meteo Forecast API (без архивного лага), "
               "сформирован в момент запуска агента. Для ретроспективной проверки используйте режим `replay`.", ""]
     else:
-        L += ["> Ретроспективный прогон: прогноз сформирован так, как если бы он выпускался в 23:00 местного времени "
+        L += [f"> Ретроспективный прогон: прогноз сформирован так, как если бы он выпускался в {issue_hour:02d}:00 местного времени "
               f"{issue_date}, только по прогнозам погоды, доступным на тот момент (Open-Meteo Previous Runs: "
-              "сутки D+1 — запуск за 1 сутки, D+2 — запуск за 2 суток).", ""]
+              "часы 1–24 — запуск за 1 сутки до целевого часа, 25–48 — за 2 суток).", ""]
     L += [f"- Время выпуска: {first['issue_time_utc']} (местное {meta.get('issue_time_local', '—')})",
           f"- Горизонт: {_hhmm(forecast['target_time_local'].min())} — {_hhmm(forecast['target_time_local'].max())} "
           f"(местное, {config.LOCAL_TZ_NAME}), {config.HORIZON_HOURS} ч",
@@ -654,17 +695,23 @@ def write_report(issue_date: str, forecast: pd.DataFrame, analysis: dict, narrat
           "Часы номинала: сумма почасовой нормированной мощности (1.0 = 1 ч на номинале). "
           "P50 и в скобках [сумма P10 – сумма P90].", ""]
     hours = _series(forecast, "farm")["target_time_local"].str[:10].value_counts()
-    labels = [f"{day} (D+{i + 1})" if not live and hours.get(day, 0) == 24 else f"{day} ({hours.get(day, 0)} ч)"
-              for i, day in enumerate(days)]
-    rows = [[labels[i]] + [_energy_cell(m[s], day) for s in SERIES] for i, day in enumerate(days)]
-    rows.append(["**Итого 48 ч**"] + [_energy_cell(m[s]) for s in SERIES])
-    L += [_md_table(["Сутки (местные)", "Турбина 1", "Турбина 2", "Парк (среднее)"], rows), ""]
+    day_labels = [f"{day} (D+{i + 1})" if not live and hours.get(day, 0) == 24 else f"{day} ({hours.get(day, 0)} ч)"
+                                for i, day in enumerate(days)]
+    rows = [[day_labels[i]] + [_energy_cell(m[s], day) for s in series] for i, day in enumerate(days)]
+    rows.append(["**Итого 48 ч**"] + [_energy_cell(m[s]) for s in series])
+    L += [_md_table(["Сутки (местные)"] + col_names, rows), ""]
+    if f.get("energy_48h_mwh") is not None:
+        L += [f"В энергии: парк {f['energy_48h_mwh']:.1f} МВт·ч за 48 ч (первые сутки {f['energy_day1_mwh']:.1f}, вторые {f['energy_day2_mwh']:.1f}) "
+              f"при {site.get('n_turbines')} × {site.get('rated_mw')} МВт.", ""]
 
     L += ["## Ключевые показатели (парк)", "",
-          f"- Средняя мощность P50: {f['mean_p50']:.2f} номинала; максимум {f['max_p50']:.2f}; средний ветер 100 м {f['mean_wind_100m']:.1f} м/с",
-          f"- Климатическая норма месяца (SCADA {analysis.get('climatology_range', ['', ''])[0]}…{analysis.get('climatology_range', ['', ''])[1]}): "
-          f"{f['climatology_mean']:.2f} → отклонение {f['vs_climatology_pct']:+.0f} %",
-          f"- Часы ≥ 0.9 номинала: {_pct(f['share_high'])}; часы ≤ 0.05: {_pct(f['share_calm'])}",
+          f"- Средняя мощность P50: {f['mean_p50']:.2f} номинала; максимум {f['max_p50']:.2f}; средний ветер 100 м {f['mean_wind_100m']:.1f} м/с"]
+    if f.get("vs_climatology_pct") is not None:
+        L.append(f"- Климатическая норма месяца (SCADA {analysis.get('climatology_range', ['', ''])[0]}…{analysis.get('climatology_range', ['', ''])[1]}): "
+                 f"{f['climatology_mean']:.2f} → отклонение {f['vs_climatology_pct']:+.0f} %")
+    else:
+        L.append("- Климатическая норма: нет истории SCADA для этой площадки")
+    L += [f"- Часы ≥ 0.9 номинала: {_pct(f['share_high'])}; часы ≤ 0.05: {_pct(f['share_calm'])}",
           f"- Макс. часовой скачок P50: {f['max_ramp']:.2f} (к {f['max_ramp_time_local']}), скачков > {RAMP_THRESHOLD}: {f['n_ramps_over_threshold']}",
           f"- Средняя ширина P90−P10: {f['mean_band_p90_p10']:.2f} (чем уже, тем увереннее прогноз)"]
     rev = analysis.get("revision")
