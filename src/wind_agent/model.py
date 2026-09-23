@@ -169,13 +169,13 @@ def backtest(wx: WeatherClient, out_dir: Path = config.OUTPUTS_DIR) -> dict:
     res["overall"] = {"model": metrics(test["power"], test["p50"]),
                       "power_curve": metrics(test["power"], test["power_curve"]),
                       "persistence": metrics(test.dropna(subset=["persistence"])["power"], test.dropna(subset=["persistence"])["persistence"])}
+    cov = 100 * ((test["power"] >= test["p10"]) & (test["power"] <= test["p90"])).mean()
+    cov_raw = 100 * ((test["power"] >= test["p10_raw"]) & (test["power"] <= test["p90_raw"])).mean()
+    res["overall"]["coverage_p10_p90_pct"], res["overall"]["coverage_raw_pct"] = float(cov), float(cov_raw)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "backtest_metrics.json").write_text(json.dumps(res, ensure_ascii=False, indent=2))
     cols = ["turbine", "lead_day", "power", "p10", "p50", "p90", "p10_raw", "p90_raw", "power_curve", "persistence", "wind_speed_100m", "wind_meas"]
     test[cols].to_csv(out_dir / "backtest_predictions.csv")
-    cov = 100 * ((test["power"] >= test["p10"]) & (test["power"] <= test["p90"])).mean()
-    cov_raw = 100 * ((test["power"] >= test["p10_raw"]) & (test["power"] <= test["p90_raw"])).mean()
-    res["overall"]["coverage_p10_p90_pct"], res["overall"]["coverage_raw_pct"] = float(cov), float(cov_raw)
     log.info("Бэктест: model MAE %.4f | power curve %.4f | persistence %.4f | покрытие P10–P90 %.1f%% (без калибровки %.1f%%)",
              res["overall"]["model"]["mae"], res["overall"]["power_curve"]["mae"], res["overall"]["persistence"]["mae"], cov, cov_raw)
     return res
