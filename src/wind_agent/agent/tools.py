@@ -475,7 +475,8 @@ _SKIP_PATTERNS = [
     re.compile(r"\b\d{1,2}\.\d{1,2}\.\d{2,4}\b"),
     re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\b"),
     re.compile(rf"\b\d{{1,2}}(?:\s*[–\-‑]\s*\d{{1,2}})?[\s\-‑–]*(?:{_MONTHS_RU})[а-яё]*\.?", re.IGNORECASE),
-    re.compile(r"UTC\s*[+\-−]\s*\d{1,2}", re.IGNORECASE),
+    re.compile(r"UTC\s*[+\-−]\s*\d{1,2}(?::\d{2})?", re.IGNORECASE),
+    re.compile(r"(?<![\d.,])[+\-−]\d{2}:\d{2}\b"),               # смещение часового пояса «+05:00» само по себе
     re.compile(r"[A-Za-zА-Яа-яЁё_]+[+\-−]?\d+(?:[.,]\d+)?"),
 ]
 _NUMBER_RE = re.compile(r"(?<![\w.,])(\d+(?:[.,]\d+)?)([ \u00a0\u202f]?(?:%|процент\w*|п\.\s?п\.))?", re.IGNORECASE)
