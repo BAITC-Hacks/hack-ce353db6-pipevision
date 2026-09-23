@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ВЭС: поле ветра 3D</title>
+<style>
+  :root {
+    --bg: #0a0f16; --panel: #0f1620; --card: #131c28; --line: #223044; --text: #e6edf5; --muted: #8fa1b7;
+    --accent: #5eead4; --accent-soft: rgba(94, 234, 212, .16); --amber: #fbbf24; --warn: #f59e0b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+  body { display: flex; flex-direction: column; min-height: 100vh; }
+  header { padding: 10px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 12px 20px; align-items: center; flex-wrap: wrap; background: #0c131c; }
+  header h1 { font-size: 17px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  header .disclaimer { color: var(--muted); font-size: 13px; }
+  header .disclaimer b { color: #ffd28a; font-weight: 600; }
+  .badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  .badge.sample { color: #1a1204; background: var(--warn); border-color: var(--warn); font-weight: 600; }
+  main { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 390px; min-height: 0; }
+  #scene { position: relative; min-height: 420px; overflow: hidden; }
+  #scene canvas { display: block; width: 100%; height: 100%; }
+  aside { border-left: 1px solid var(--line); background: var(--panel); overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; max-height: calc(100vh - 58px); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+  select, button { font: inherit; color: var(--text); background: #0c131c; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+  button { cursor: pointer; }
+  button:hover, select:hover { border-color: #37506e; }
+  button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > select { flex: 1; min-width: 0; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+  .time-big { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  #play { width: 40px; font-size: 15px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat { background: #0e1621; border: 1px solid #1b2738; border-radius: 8px; padding: 8px 10px; }
+  .stat .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .stat .v { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .stat .v small { font-size: 12px; font-weight: 500; color: var(--muted); }
+  .stat .s { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .stat.power { grid-column: span 2; display: flex; align-items: center; gap: 14px; }
+  .stat.power .v { font-size: 30px; color: var(--accent); }
+  .arrow { display: inline-block; width: 18px; height: 18px; vertical-align: -3px; transition: transform .25s; }
+  canvas.chart { width: 100%; display: block; cursor: crosshair; touch-action: none; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; padding: 4px 10px; background: transparent; color: var(--muted); }
+  .seg button[aria-pressed=true] { background: #1b2a3c; color: var(--text); }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: var(--muted); }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  label.ctl { display: grid; grid-template-columns: 150px 1fr 40px; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  label.chk { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); }
+  .hud { position: absolute; pointer-events: none; font-size: 12px; color: var(--muted); }
+  .hud.tl { left: 12px; top: 10px; background: rgba(10,15,22,.72); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .hud.tl .now { color: var(--text); font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .hud.bl { left: 12px; bottom: 12px; width: min(300px, calc(100% - 100px)); background: rgba(10,15,22,.72); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .tbar { position: relative; height: 10px; border-radius: 3px; margin: 6px 0 2px; }
+  .tbar .mk { position: absolute; top: -4px; width: 2px; height: 18px; background: #fff; box-shadow: 0 0 0 1px #000; }
+  .tticks { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
+  .hud.br { right: 12px; bottom: 12px; text-align: center; }
+  .compass { width: 54px; height: 54px; border-radius: 50%; border: 1px solid var(--line); background: rgba(10,15,22,.72); position: relative; margin: 0 auto 4px; }
+  .compass .needle { position: absolute; inset: 0; transition: none; }
+  .hud.tr { right: 12px; top: 10px; text-align: right; max-width: 260px; }
+  #err { display: none; position: absolute; inset: 0; align-items: center; justify-content: center; text-align: center; padding: 24px; color: #fecaca; }
+  footer.note { font-size: 12px; color: var(--muted); }
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; }
+    .hud.tr { display: none; }
+    #scene { height: 62vh; }
+    aside { border-left: 0; border-top: 1px solid var(--line); max-height: none; }
+    label.ctl { grid-template-columns: 120px 1fr 36px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>ВЭС · поле ветра над рельефом</h1>
+  <div class="disclaimer">Визуализация прогнозного поля ветра Open-Meteo над рельефом ВЭС. <b>Не является CFD-симуляцией.</b></div>
+  <span id="srcBadge" class="badge">данные…</span>
+</header>
+<main>
+  <div id="scene">
+    <div class="hud tl" aria-live="polite">
+      <div class="now" id="hudTime">—</div>
+      <div id="hudWind">—</div>
+    </div>
+    <div class="hud tr small" id="hudHint">Мышь: вращение · колесо: масштаб · правая кнопка: сдвиг<br>Пробел — пуск/пауза, ← → — час</div>
+    <div class="hud bl">
+      <div class="small">Цвет частиц — температура 2 м, °C (поправка на высоту рельефа −6,5 °C/км)</div>
+      <div class="tbar" id="tbar"><div class="mk" id="tmark"></div></div>
+      <div class="tticks small" id="tticks"></div>
+    </div>
+    <div class="hud br small">
+      <div class="compass"><svg class="needle" id="needle" viewBox="0 0 54 54" aria-hidden="true">
+        <polygon points="27,6 32,27 22,27" fill="#f87171"/><polygon points="27,48 32,27 22,27" fill="#94a3b8"/>
+        <text x="27" y="5.5" fill="#e6edf5" font-size="8" text-anchor="middle" font-weight="700">С</text></svg></div>
+      <div id="scaleNote">квадрат 12 × 12 км</div>
+    </div>
+    <div id="err"></div>
+  </div>
+  <aside>
+    <section class="card">
+      <h2>Выпуск прогноза</h2>
+      <div class="row"><select id="issue" aria-label="Дата выпуска прогноза"></select></div>
+      <div class="small muted" id="issueMeta" style="margin-top:6px"></div>
+    </section>
+    <section class="card">
+      <h2>Час прогноза (местное время, UTC+5)</h2>
+      <div class="time-big" id="timeLabel">—</div>
+      <div class="small muted" id="leadLabel">—</div>
+      <input type="range" id="slider" min="0" max="47" step="0.01" value="0" aria-label="Час прогноза">
+      <div class="row">
+        <button id="play" aria-label="Пуск / пауза">▶</button>
+        <button id="prev" aria-label="Предыдущий час">−1 ч</button>
+        <button id="next" aria-label="Следующий час">+1 ч</button>
+        <select id="speed" aria-label="Скорость воспроизведения">
+          <option value="0.25">1 ч за 4 с</option>
+          <option value="0.5" selected>1 ч за 2 с</option>
+          <option value="1">1 ч/с</option>
+          <option value="2">2 ч/с</option>
+        </select>
+      </div>
+    </section>
+    <section class="card">
+      <h2>Прогноз на этот час</h2>
+      <div class="grid2">
+        <div class="stat"><div class="k">Ветер 100 м</div><div class="v" id="vWs">—</div><div class="s" id="vGust">—</div></div>
+        <div class="stat"><div class="k">Направление</div>
+          <div class="v"><svg class="arrow" id="vArrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 L18 20 L12 16 L6 20 Z" fill="#5eead4"/></svg> <span id="vDir">—</span></div>
+          <div class="s" id="vDirS">—</div></div>
+        <div class="stat"><div class="k">Температура 2 м</div><div class="v" id="vT">—</div><div class="s">прогноз Open-Meteo</div></div>
+        <div class="stat"><div class="k">T1 / T2, P50</div><div class="v" id="vT12">—</div><div class="s">% от номинала</div></div>
+        <div class="stat power"><div><div class="k">Мощность парка P50</div><div class="v" id="vP50">—</div></div>
+          <div class="s">P10–P90<br><span id="vBand" style="color:var(--text);font-size:15px">—</span><br>% от номинала</div></div>
+      </div>
+    </section>
+    <section class="card">
+      <h2>Мощность парка на 48 ч</h2>
+      <canvas id="chart" class="chart" data-h="178" aria-label="График прогноза мощности парка P50 с интервалом P10–P90"></canvas>
+      <div class="legend" style="margin-top:6px">
+        <span><i style="background:var(--accent)"></i>P50</span>
+        <span><i style="background:rgba(94,234,212,.3)"></i>P10–P90</span>
+        <span><i style="background:#8193a8"></i>ветер 100 м (правая ось)</span>
+        <span><i style="background:var(--amber)"></i>текущий час</span>
+      </div>
+    </section>
+    <section class="card">
+      <div class="row" style="justify-content:space-between;margin-bottom:6px">
+        <h2 style="margin:0">Роза ветров, 100 м</h2>
+        <div class="seg" role="group" aria-label="Период розы ветров">
+          <button id="roseAll" aria-pressed="true">весь период</button><button id="roseFeb" aria-pressed="false">февраль</button>
+        </div>
+      </div>
+      <canvas id="rose" class="chart" data-h="260" aria-label="Роза ветров" style="cursor:default"></canvas>
+      <div class="small muted" id="roseStats"></div>
+      <div class="legend" id="roseLegend" style="margin-top:4px"></div>
+    </section>
+    <section class="card">
+      <h2>Вид</h2>
+      <label class="ctl">Вертикальный масштаб <input type="range" id="exag" min="1" max="5" step="0.5" value="3"><span id="exagV">×3</span></label>
+      <label class="ctl">Частиц <input type="range" id="count" min="2000" max="4000" step="500" value="2500"><span id="countV">2500</span></label>
+      <label class="chk"><input type="checkbox" id="autorot"> Автовращение камеры</label>
+    </section>
+    <footer class="note card">
+      Ветер задан одним прогнозом Open-Meteo на 100 м для площадки ВЭС: направление и скорость одинаковы по всему квадрату,
+      частицы держатся ~100 м над рельефом (с тем же вертикальным масштабом), движение ускорено ×120, лёгкий визуальный шум
+      добавлен для читаемости. Обтекание рельефа, турбулентность и аэродинамические следы турбин <b>не моделируются</b>.
+      Турбины показаны увеличенными. Рельеф: <span id="demSrc"></span>.
+    </footer>
+  </aside>
+</main>
+
+<script src="data/viz_data.js"></script>
+<script>
+  // Если three.js не загрузился с CDN (нет интернета) или нет данных — показываем понятное сообщение.
+  window.__showErr = function (msg) { const e = document.getElementById('err'); e.style.display = 'flex'; e.innerHTML = msg; };
+  if (!window.VIZ_DATA) window.__showErr('Нет данных: выполните <code>.venv/bin/python scripts/build_viz_data.py</code> и обновите страницу.');
+  setTimeout(function () { if (window.VIZ_DATA && !window.__vizStarted) window.__showErr('three.js не загрузился с CDN (cdn.jsdelivr.net). Проверьте интернет и обновите страницу.'); }, 8000);
+</script>
+<script type="importmap">
+  { "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const D = window.VIZ_DATA;
+if (!D) throw new Error('VIZ_DATA отсутствует');
+window.__vizStarted = true;
+
+// ---------------------------------------------------------------- константы и утилиты
+const DEG = Math.PI / 180;
+const SECT = ['С','ССВ','СВ','ВСВ','В','ВЮВ','ЮВ','ЮЮВ','Ю','ЮЮЗ','ЮЗ','ЗЮЗ','З','ЗСЗ','СЗ','ССЗ'];
+const WD = ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'];
+const TIME_ACCEL = 120;          // ускорение движения частиц
+const HUB_M = D.hub_height_m || 100;
+const T = D.terrain;
+const elev = Float32Array.from(T.elev);
+const BASE = T.min_m;            // нижняя отметка рельефа → y = 0
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, f) => a + (b - a) * f;
+const lerpAngle = (a, b, f) => { let d = ((b - a + 540) % 360) - 180; return (a + d * f + 360) % 360; };
+const dirName = d => SECT[Math.round(((d % 360) + 360) % 360 / 22.5) % 16];
+const pct = v => (v == null || isNaN(v)) ? '—' : Math.round(v * 100) + '';
+const fmtLocal = s => { const [d, t] = s.split(' '); const [y, m, dd] = d.split('-').map(Number);
+  return { date: `${String(dd).padStart(2,'0')}.${String(m).padStart(2,'0')}.${y}`, time: t, wd: WD[new Date(Date.UTC(y, m - 1, dd)).getUTCDay()] }; };
+
+function groundAt(x, yN) {       // билинейная интерполяция DEM, метры (x — восток, yN — север)
+  const fi = clamp((x - T.x0_m) / T.step_m, 0, T.nx - 1.0001), fj = clamp((yN - T.y0_m) / T.step_m, 0, T.ny - 1.0001);
+  const i = fi | 0, j = fj | 0, di = fi - i, dj = fj - j, k = j * T.nx + i;
+  return elev[k] * (1 - di) * (1 - dj) + elev[k + 1] * di * (1 - dj) + elev[k + T.nx] * (1 - di) * dj + elev[k + T.nx + 1] * di * dj;
+}
+
+// температурная шкала синий → белый → красный (0 °C — белый)
+const allT = D.forecasts.flatMap(f => f.hours.map(h => h.temperature_2m)).filter(v => v != null);
+const T_LO = Math.min(-20, Math.floor(Math.min(...allT) / 5) * 5), T_HI = Math.max(20, Math.ceil(Math.max(...allT) / 5) * 5);
+const T_STOPS = [[0, [49, 54, 149]], [0.25, [69, 117, 180]], [0.5, [235, 240, 245]], [0.75, [244, 109, 67]], [1, [180, 20, 38]]];
+function tempNorm(t) { return t < 0 ? 0.5 * (1 - clamp(t / T_LO, 0, 1)) : 0.5 + 0.5 * clamp(t / T_HI, 0, 1); }
+function tempRGB(t) {
+  const u = tempNorm(t);
+  for (let s = 1; s < T_STOPS.length; s++) if (u <= T_STOPS[s][0]) {
+    const [u0, c0] = T_STOPS[s - 1], [u1, c1] = T_STOPS[s], f = (u - u0) / (u1 - u0);
+    return [lerp(c0[0], c1[0], f) / 255, lerp(c0[1], c1[1], f) / 255, lerp(c0[2], c1[2], f) / 255];
+  }
+  return T_STOPS[T_STOPS.length - 1][1].map(v => v / 255);
+}
+(function buildTempLegend() {
+  const stops = T_STOPS.map(([u, c]) => `rgb(${c.join(',')}) ${u * 100}%`).join(',');
+  document.getElementById('tbar').style.background = `linear-gradient(90deg, ${stops})`;
+  document.getElementById('tticks').innerHTML = [T_LO, T_LO / 2, 0, T_HI / 2, T_HI].map(v => `<span>${v > 0 ? '+' : ''}${v}</span>`).join('');
+})();
+
+// ---------------------------------------------------------------- сцена
+const host = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+host.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#0a0f16');
+scene.fog = new THREE.Fog('#0a0f16', 26000, 60000);
+const camera = new THREE.PerspectiveCamera(42, 1, 20, 120000);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.dampingFactor = 0.08;
+controls.maxPolarAngle = Math.PI / 2 - 0.06; controls.minDistance = 600; controls.maxDistance = 40000;
+controls.autoRotateSpeed = 0.4;
+
+scene.add(new THREE.HemisphereLight('#c7dcff', '#1a222c', 0.75));
+const sun = new THREE.DirectionalLight('#fff4e0', 1.6); sun.position.set(-9000, 12000, -5000); scene.add(sun);
+
+const state = { exag: 3, issue: 0, t: 0, playing: true, hps: 0.5, count: 2500, rose: 'all' };
+let terrainGroup = null;
+
+function hypso(u) {               // окраска по высоте
+  const st = [[0, [34, 66, 52]], [0.25, [62, 94, 62]], [0.5, [118, 118, 74]], [0.72, [146, 116, 80]], [0.88, [178, 160, 132]], [1, [226, 222, 212]]];
+  for (let s = 1; s < st.length; s++) if (u <= st[s][0]) {
+    const f = (u - st[s - 1][0]) / (st[s][0] - st[s - 1][0]);
+    return st[s - 1][1].map((c, k) => lerp(c, st[s][1][k], f) / 255);
+  }
+  return st[st.length - 1][1].map(c => c / 255);
+}
+const toY = h => (h - BASE) * state.exag;
+
+function buildTerrain() {
+  if (terrainGroup) { terrainGroup.traverse(o => { o.geometry?.dispose(); o.material?.dispose?.(); }); scene.remove(terrainGroup); }
+  terrainGroup = new THREE.Group();
+  const { nx, ny, step_m: st, x0_m: x0, y0_m: y0 } = T;
+  const range = Math.max(1, T.max_m - T.min_m);
+  const pos = new Float32Array(nx * ny * 3), col = new Float32Array(nx * ny * 3);
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const k = j * nx + i, h = elev[k];
+    pos.set([x0 + i * st, toY(h), -(y0 + j * st)], k * 3);
+    col.set(hypso((h - T.min_m) / range), k * 3);
+  }
+  const idx = [];
+  for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+    const a = j * nx + i, b = a + 1, c = a + nx, d = c + 1;
+    idx.push(a, b, c, b, d, c);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  g.setIndex(idx); g.computeVertexNormals();
+  // нормали смотрят вверх при обходе a,b,c в координатах (x, -y): проверяем и при необходимости разворачиваем
+  if (g.attributes.normal.getY(0) < 0) { for (let n = 0; n < idx.length; n += 3) [idx[n + 1], idx[n + 2]] = [idx[n + 2], idx[n + 1]]; g.setIndex(idx); g.computeVertexNormals(); }
+  terrainGroup.add(new THREE.Mesh(g, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, metalness: 0, side: THREE.DoubleSide })));
+
+  // сетка 1 км по рельефу
+  const lp = [], every = Math.round(1000 / st), lift = 4 * state.exag;
+  for (let j = 0; j < ny; j += every) for (let i = 0; i < nx - 1; i++)
+    lp.push(x0 + i * st, toY(elev[j * nx + i]) + lift, -(y0 + j * st), x0 + (i + 1) * st, toY(elev[j * nx + i + 1]) + lift, -(y0 + j * st));
+  for (let i = 0; i < nx; i += every) for (let j = 0; j < ny - 1; j++)
+    lp.push(x0 + i * st, toY(elev[j * nx + i]) + lift, -(y0 + j * st), x0 + i * st, toY(elev[(j + 1) * nx + i]) + lift, -(y0 + (j + 1) * st));
+  const lg = new THREE.BufferGeometry(); lg.setAttribute('position', new THREE.Float32BufferAttribute(lp, 3));
+  terrainGroup.add(new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: '#b8cde3', transparent: true, opacity: 0.13 })));
+
+  // «срез» блока рельефа по краям
+  const bottom = -160, wp = [], wc = [];
+  const edge = (pts) => { for (let n = 0; n < pts.length - 1; n++) { const [ax, ah, az] = pts[n], [bx, bh, bz] = pts[n + 1];
+    wp.push(ax, toY(ah), az, bx, toY(bh), bz, ax, bottom, az, bx, toY(bh), bz, bx, bottom, bz, ax, bottom, az);
+    for (let q = 0; q < 6; q++) wc.push(0.14, 0.17, 0.2); } };
+  const S = [], N = [], W = [], E = [];
+  for (let i = 0; i < nx; i++) { S.push([x0 + i * st, elev[i], -y0]); N.push([x0 + i * st, elev[(ny - 1) * nx + i], -(y0 + (ny - 1) * st)]); }
+  for (let j = 0; j < ny; j++) { W.push([x0, elev[j * nx], -(y0 + j * st)]); E.push([x0 + (nx - 1) * st, elev[j * nx + nx - 1], -(y0 + j * st)]); }
+  [S, N, W, E].forEach(edge);
+  const wg = new THREE.BufferGeometry();
+  wg.setAttribute('position', new THREE.Float32BufferAttribute(wp, 3)); wg.setAttribute('color', new THREE.Float32BufferAttribute(wc, 3));
+  terrainGroup.add(new THREE.Mesh(wg, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })));
+
+  // стороны света по краям
+  const half = T.half_size_m, yl = toY(T.max_m) + 300;
+  [['С', 0, -half - 700, '#fca5a5'], ['Ю', 0, half + 700, '#cbd5e1'], ['З', -half - 700, 0, '#cbd5e1'], ['В', half + 700, 0, '#cbd5e1']]
+    .forEach(([t, x, z, c]) => { const s = textSprite(t, c, 64); s.position.set(x, yl * 0.4, z); terrainGroup.add(s); });
+  scene.add(terrainGroup);
+}
+
+function textSprite(text, color = '#e6edf5', px = 44, sub = '') {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 128;
+  const g = c.getContext('2d');
+  g.font = `700 ${px}px system-ui, sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.lineWidth = 8; g.strokeStyle = 'rgba(5,8,12,.85)';
+  g.strokeText(text, 128, sub ? 48 : 64); g.fillStyle = color; g.fillText(text, 128, sub ? 48 : 64);
+  if (sub) { g.font = `500 26px system-ui, sans-serif`; g.strokeText(sub, 128, 96); g.fillStyle = '#b6c4d4'; g.fillText(sub, 128, 96); }
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, sizeAttenuation: false, depthTest: false, transparent: true }));
+  s.scale.set(0.09, 0.045, 1); s.renderOrder = 10;
+  return s;
+}
+
+// ---------------------------------------------------------------- турбины
+const turbines = D.turbines.map(tb => {
+  const grp = new THREE.Group();
+  const white = new THREE.MeshStandardMaterial({ color: '#e9eef4', roughness: 0.45, metalness: 0.1 });
+  const tower = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 2.8, HUB_M, 12), white); tower.position.y = HUB_M / 2; grp.add(tower);
+  const head = new THREE.Group(); head.position.y = HUB_M; grp.add(head);
+  const nac = new THREE.Mesh(new THREE.BoxGeometry(12, 4.2, 4.2), white); nac.position.x = -3; head.add(nac);
+  const hub = new THREE.Mesh(new THREE.SphereGeometry(2.4, 12, 8), white); hub.position.x = 3.6; head.add(hub);
+  const rotor = new THREE.Group(); rotor.position.x = 4.2; head.add(rotor);
+  const bladeG = new THREE.BoxGeometry(0.8, 50, 2.6); bladeG.translate(0, 25, 0);
+  for (let b = 0; b < 3; b++) { const bl = new THREE.Mesh(bladeG, white); bl.rotation.x = b * 2 * Math.PI / 3; rotor.add(bl); }
+  const label = textSprite(tb.name, '#ffffff', 46, ''); grp.add(label);
+  label.scale.set(0.07, 0.035);
+  label.center.set(tb.x_m < 0 ? 0.62 : 0.38, 0.1);   // T1 (запад) чуть влево, T2 (восток) чуть вправо — не слипаются издалека
+  scene.add(grp);
+  return { ...tb, grp, head, rotor, label, yaw: null, omega: 0 };
+});
+function placeTurbines() {
+  const s = state.exag;             // турбина масштабируется вместе с вертикалью → ступица на уровне слоя частиц
+  turbines.forEach(tb => {
+    tb.grp.position.set(tb.x_m, toY(tb.ground_m), -tb.y_m);
+    tb.grp.scale.setScalar(s);
+    tb.label.position.set(0, HUB_M + 58, 0);
+  });
+}
+
+// ---------------------------------------------------------------- частицы
+const MAXP = 4000;
+const P = {
+  x: new Float32Array(MAXP), y: new Float32Array(MAXP), age: new Float32Array(MAXP), life: new Float32Array(MAXP),
+  sf: new Float32Array(MAXP), dz: new Float32Array(MAXP), ph: new Float32Array(MAXP),
+};
+const linePos = new Float32Array(MAXP * 6), lineCol = new Float32Array(MAXP * 6);
+const ptPos = new Float32Array(MAXP * 3), ptCol = new Float32Array(MAXP * 3);
+function spawn(i, anyAge) {
+  const h = T.half_size_m;
+  P.x[i] = (Math.random() * 2 - 1) * h; P.y[i] = (Math.random() * 2 - 1) * h;
+  P.life[i] = 3.5 + Math.random() * 4.5; P.age[i] = anyAge ? Math.random() * P.life[i] : 0;
+  P.sf[i] = 0.85 + Math.random() * 0.3; P.dz[i] = (Math.random() * 2 - 1) * 25; P.ph[i] = Math.random() * 6.283;
+}
+for (let i = 0; i < MAXP; i++) spawn(i, true);
+const lineGeo = new THREE.BufferGeometry();
+lineGeo.setAttribute('position', new THREE.BufferAttribute(linePos, 3).setUsage(THREE.DynamicDrawUsage));
+lineGeo.setAttribute('color', new THREE.BufferAttribute(lineCol, 3).setUsage(THREE.DynamicDrawUsage));
+const lines = new THREE.LineSegments(lineGeo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+lines.frustumCulled = false; scene.add(lines);
+const dot = (() => { const c = document.createElement('canvas'); c.width = c.height = 32; const g = c.getContext('2d');
+  const gr = g.createRadialGradient(16, 16, 0, 16, 16, 16); gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.4, 'rgba(255,255,255,.6)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 32, 32); return new THREE.CanvasTexture(c); })();
+const ptGeo = new THREE.BufferGeometry();
+ptGeo.setAttribute('position', new THREE.BufferAttribute(ptPos, 3).setUsage(THREE.DynamicDrawUsage));
+ptGeo.setAttribute('color', new THREE.BufferAttribute(ptCol, 3).setUsage(THREE.DynamicDrawUsage));
+const points = new THREE.Points(ptGeo, new THREE.PointsMaterial({ size: 3.2, sizeAttenuation: false, map: dot, vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+points.frustumCulled = false; scene.add(points);
+
+const siteGround = D.turbines.reduce((s, t) => s + t.ground_m, 0) / D.turbines.length;
+let simT = 0;
+function stepParticles(dt, w) {
+  const n = state.count, h = T.half_size_m, ex = state.exag;
+  const th = w.wd * DEG, ux = -Math.sin(th) * w.ws, uN = -Math.cos(th) * w.ws;   // вектор «куда дует» (восток, север)
+  const trail = 0.33;               // длина хвоста, с (в ускоренном времени)
+  for (let i = 0; i < n; i++) {
+    P.age[i] += dt;
+    let x = P.x[i], yN = P.y[i];
+    // лёгкий визуальный шум направления/скорости (без физического смысла)
+    const a = 0.16 * Math.sin(0.00045 * x + 0.21 * simT + P.ph[i] * 0.15) * Math.cos(0.0005 * yN - 0.17 * simT) + 0.06 * Math.sin(0.0011 * (x + yN) + 0.33 * simT);
+    const ca = Math.cos(a), sa = Math.sin(a), k = P.sf[i] * TIME_ACCEL;
+    const vx = (ux * ca - uN * sa) * k, vy = (ux * sa + uN * ca) * k;
+    x += vx * dt; yN += vy * dt;
+    if (P.age[i] > P.life[i] || Math.abs(x) > h || Math.abs(yN) > h) { spawn(i, false); x = P.x[i]; yN = P.y[i]; }
+    P.x[i] = x; P.y[i] = yN;
+    const tx = clamp(x - vx * trail, -h, h), ty = clamp(yN - vy * trail, -h, h);
+    const g0 = groundAt(x, yN), g1 = groundAt(tx, ty), alt = HUB_M + P.dz[i];
+    const y0 = (g0 - BASE + alt) * ex, y1 = (g1 - BASE + alt) * ex;
+    const o = i * 6;
+    linePos[o] = x; linePos[o + 1] = y0; linePos[o + 2] = -yN; linePos[o + 3] = tx; linePos[o + 4] = y1; linePos[o + 5] = -ty;
+    ptPos[i * 3] = x; ptPos[i * 3 + 1] = y0; ptPos[i * 3 + 2] = -yN;
+    const fade = Math.min(1, P.age[i] / 0.7) * Math.min(1, (P.life[i] - P.age[i]) / 0.9);
+    const [r, g, b] = tempRGB(w.t2m - 0.0065 * (g0 - siteGround));
+    const f = 0.62 * fade, ft = 0.06 * fade;
+    lineCol[o] = r * f; lineCol[o + 1] = g * f; lineCol[o + 2] = b * f; lineCol[o + 3] = r * ft; lineCol[o + 4] = g * ft; lineCol[o + 5] = b * ft;
+    ptCol[i * 3] = r * f; ptCol[i * 3 + 1] = g * f; ptCol[i * 3 + 2] = b * f;
+  }
+  lineGeo.setDrawRange(0, n * 2); ptGeo.setDrawRange(0, n);
+  lineGeo.attributes.position.needsUpdate = lineGeo.attributes.color.needsUpdate = true;
+  ptGeo.attributes.position.needsUpdate = ptGeo.attributes.color.needsUpdate = true;
+}
+
+// ---------------------------------------------------------------- данные прогноза
+const issues = D.forecasts;
+const hoursOf = () => issues[state.issue].hours;
+function weatherAt(t) {              // непрерывное время → интерполяция между часами
+  const H = hoursOf(), i = clamp(Math.floor(t), 0, H.length - 1), j = Math.min(i + 1, H.length - 1), f = clamp(t - i, 0, 1);
+  const a = H[i], b = H[j], v = (k) => lerp(a[k] ?? 0, b[k] ?? a[k] ?? 0, f);
+  return { ws: v('wind_speed_100m'), wd: lerpAngle(a.wind_direction_100m ?? 0, b.wind_direction_100m ?? a.wind_direction_100m ?? 0, f), t2m: v('temperature_2m'),
+    p50: v('p50'), p50_t1: v('p50_t1'), p50_t2: v('p50_t2') };
+}
+
+// ---------------------------------------------------------------- панель
+const $ = id => document.getElementById(id);
+const sel = $('issue');
+issues.forEach((f, k) => {
+  const d = fmtLocal(f.issue_date + ' 23:00'), h0 = f.hours[0] ? fmtLocal(f.hours[0].target_local) : null, h1 = f.hours.at(-1) ? fmtLocal(f.hours.at(-1).target_local) : null;
+  const o = document.createElement('option'); o.value = k;
+  o.textContent = `${d.date} 23:00 → ${h0 ? h0.date.slice(0, 5) : ''}–${h1 ? h1.date.slice(0, 5) : ''}`;
+  sel.appendChild(o);
+});
+const pref = issues.findIndex(f => f.issue_date === '2026-02-10');
+state.issue = pref >= 0 ? pref : issues.length - 1; sel.value = state.issue;
+const isSample = D.forecast_source === 'sample';
+$('srcBadge').textContent = isSample ? 'ОБРАЗЕЦ прогноза (модель + архив Open-Meteo)' : `прогнозы: outputs/forecasts · ${issues.length} выпусков`;
+if (isSample) $('srcBadge').classList.add('sample');
+$('demSrc').textContent = `${T.source}, сетка ${T.nx}×${T.ny}, шаг ${T.step_m} м, высоты ${Math.round(T.min_m)}–${Math.round(T.max_m)} м`;
+function updateIssueMeta() {
+  const f = issues[state.issue];
+  $('issueMeta').innerHTML = `Выпуск ${fmtLocal(f.issue_date + ' 23:00').date} 23:00 местного, ${f.n_hours} ч.<br>Модель: ${f.model_version || '—'}<br>Погода: ${f.weather_source || '—'}`;
+}
+
+function updateReadouts() {
+  const H = hoursOf(), k = clamp(Math.round(state.t), 0, H.length - 1), h = H[k];
+  const L = fmtLocal(h.target_local);
+  $('timeLabel').textContent = `${L.wd}, ${L.date} ${L.time}`;
+  $('leadLabel').textContent = `горизонт +${h.lead_hours ?? k + 1} ч · сутки D+${h.lead_day ?? (k < 24 ? 1 : 2)} · час ${k + 1} из ${H.length}`;
+  $('hudTime').textContent = `${L.wd}, ${L.date} ${L.time} (UTC+5)`;
+  const dn = dirName(h.wind_direction_100m);
+  $('hudWind').innerHTML = `ветер ${h.wind_speed_100m?.toFixed(1)} м/с из ${dn} · ${h.temperature_2m > 0 ? '+' : ''}${h.temperature_2m?.toFixed(1)} °C · P50 парка <b style="color:var(--accent)">${pct(h.p50)} %</b>`;
+  $('vWs').innerHTML = `${h.wind_speed_100m?.toFixed(1) ?? '—'} <small>м/с</small>`;
+  $('vGust').textContent = h.wind_gusts_10m != null ? `порывы 10 м: ${h.wind_gusts_10m.toFixed(1)} м/с` : ' ';
+  $('vDir').textContent = `${dn} ${Math.round(h.wind_direction_100m)}°`;
+  $('vDirS').textContent = 'откуда дует; стрелка — куда';
+  $('vArrow').style.transform = `rotate(${(h.wind_direction_100m + 180) % 360}deg)`;
+  $('vT').innerHTML = `${h.temperature_2m > 0 ? '+' : ''}${h.temperature_2m?.toFixed(1) ?? '—'} <small>°C</small>`;
+  $('vT12').innerHTML = `${pct(h.p50_t1)} / ${pct(h.p50_t2)}`;
+  $('vP50').innerHTML = `${pct(h.p50)} <small>%</small>`;
+  $('vBand').textContent = `${pct(h.p10)}–${pct(h.p90)} %`;
+  $('tmark').style.left = `calc(${tempNorm(h.temperature_2m) * 100}% - 1px)`;
+  if (!dragging) $('slider').value = state.t;
+}
+
+// ---------------------------------------------------------------- график P50
+const chart = $('chart');
+let dragging = false;
+function sizeCanvas(c) { const r = c.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const h = +c.dataset.h; c.width = Math.round(r.width * dpr); c.height = Math.round(h * dpr); c.style.height = h + 'px';
+  const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); return [g, r.width, h]; }
+const CH = { l: 34, r: 30, t: 8, b: 34 };
+function drawChart() {
+  const [g, W, Hh] = sizeCanvas(chart), H = hoursOf(), n = H.length;
+  const pw = W - CH.l - CH.r, ph = Hh - CH.t - CH.b;
+  const X = i => CH.l + (i / Math.max(1, n - 1)) * pw, Y = v => CH.t + (1 - v) * ph;
+  const wsMax = Math.max(15, Math.ceil(Math.max(...H.map(h => h.wind_speed_100m ?? 0)) / 5) * 5), YW = v => CH.t + (1 - v / wsMax) * ph;
+  g.clearRect(0, 0, W, Hh);
+  g.font = '11px system-ui, sans-serif'; g.textBaseline = 'middle';
+  for (const v of [0, 0.25, 0.5, 0.75, 1]) {
+    g.strokeStyle = '#1e2b3c'; g.lineWidth = 1; g.beginPath(); g.moveTo(CH.l, Y(v)); g.lineTo(W - CH.r, Y(v)); g.stroke();
+    g.fillStyle = '#8fa1b7'; g.textAlign = 'right'; g.fillText(Math.round(v * 100) + '%', CH.l - 4, Y(v));
+    g.textAlign = 'left'; g.fillText(Math.round(v * wsMax), W - CH.r + 4, Y(v));
+  }
+  g.textAlign = 'center'; g.textBaseline = 'top';
+  H.forEach((h, i) => { const hh = h.target_local.slice(11, 13); if (+hh % 6 === 0) { g.fillStyle = '#8fa1b7'; g.fillText(hh, X(i), Hh - CH.b + 3); } });
+  const split = H.findIndex(h => (h.lead_day ?? 1) === 2);
+  if (split > 0) {
+    g.strokeStyle = '#34465e'; g.setLineDash([3, 3]); g.beginPath(); g.moveTo(X(split - 0.5), CH.t); g.lineTo(X(split - 0.5), CH.t + ph); g.stroke(); g.setLineDash([]);
+    g.fillStyle = '#6f8298'; g.textAlign = 'left'; g.textBaseline = 'bottom';
+    g.fillText('D+1 · ' + fmtLocal(H[0].target_local).date.slice(0, 5), CH.l + 3, Hh - 1);
+    g.fillText('D+2 · ' + fmtLocal(H[split].target_local).date.slice(0, 5), X(split) + 3, Hh - 1);
+  }
+  // интервал P10–P90
+  g.fillStyle = 'rgba(94,234,212,.17)'; g.beginPath();
+  H.forEach((h, i) => i ? g.lineTo(X(i), Y(h.p90)) : g.moveTo(X(i), Y(h.p90)));
+  for (let i = n - 1; i >= 0; i--) g.lineTo(X(i), Y(H[i].p10)); g.closePath(); g.fill();
+  // ветер (правая ось)
+  g.strokeStyle = '#8193a8'; g.lineWidth = 1.2; g.setLineDash([4, 3]); g.beginPath();
+  H.forEach((h, i) => i ? g.lineTo(X(i), YW(h.wind_speed_100m)) : g.moveTo(X(i), YW(h.wind_speed_100m))); g.stroke(); g.setLineDash([]);
+  // P50
+  g.strokeStyle = '#5eead4'; g.lineWidth = 2; g.beginPath();
+  H.forEach((h, i) => i ? g.lineTo(X(i), Y(h.p50)) : g.moveTo(X(i), Y(h.p50))); g.stroke();
+  // маркер текущего часа
+  const t = clamp(state.t, 0, n - 1), w = weatherAt(t);
+  g.strokeStyle = '#fbbf24'; g.lineWidth = 1.5; g.beginPath(); g.moveTo(X(t), CH.t); g.lineTo(X(t), CH.t + ph); g.stroke();
+  g.fillStyle = '#fbbf24'; g.beginPath(); g.arc(X(t), Y(w.p50), 4, 0, 7); g.fill();
+  g.fillStyle = '#8fa1b7'; g.textAlign = 'left'; g.textBaseline = 'top'; g.fillText('м/с', W - CH.r + 4, 0);
+}
+function chartSeek(ev) { const r = chart.getBoundingClientRect(), n = hoursOf().length;
+  state.t = clamp(Math.round((ev.clientX - r.left - CH.l) / (r.width - CH.l - CH.r) * (n - 1)), 0, n - 1); onTimeChanged(); }
+chart.addEventListener('pointerdown', e => { chart.setPointerCapture(e.pointerId); chartDrag = true; setPlaying(false); chartSeek(e); });
+let chartDrag = false;
+chart.addEventListener('pointermove', e => { if (chartDrag) chartSeek(e); });
+chart.addEventListener('pointerup', () => { chartDrag = false; });
+
+// ---------------------------------------------------------------- роза ветров
+const roseC = $('rose'), R = D.wind_rose;
+$('roseLegend').innerHTML = R.speed_bins.map((b, k) => `<span><i style="background:${R.colors[k]}"></i>${b} м/с</span>`).join('');
+function drawRose() {
+  const [g, W, Hh] = sizeCanvas(roseC), st = R[state.rose];
+  const cx = W / 2, cy = Hh / 2, rad = Math.min(W, Hh) / 2 - 22;
+  const maxPct = Math.max(...st.sector_pct), ring = maxPct > 30 ? 10 : 5, rmax = Math.ceil(maxPct / ring) * ring;
+  g.clearRect(0, 0, W, Hh);
+  g.font = '11px system-ui, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  for (let v = ring; v <= rmax; v += ring) {
+    g.strokeStyle = '#1f2c3e'; g.beginPath(); g.arc(cx, cy, rad * v / rmax, 0, 7); g.stroke();
+    g.fillStyle = '#6f8298'; g.fillText(v + '%', cx + 3, cy - rad * v / rmax + 7);
+  }
+  for (let s = 0; s < 16; s++) {
+    const a = s * 22.5 * DEG - Math.PI / 2;
+    g.strokeStyle = '#18222f'; g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx + Math.cos(a) * rad, cy + Math.sin(a) * rad); g.stroke();
+  }
+  const half = 22.5 * DEG * 0.42;
+  for (let s = 0; s < 16; s++) {
+    const a = s * 22.5 * DEG - Math.PI / 2; let acc = 0;
+    st.freq_pct[s].forEach((v, b) => {
+      if (v <= 0) return;
+      const r0 = rad * acc / rmax, r1 = rad * (acc + v) / rmax; acc += v;
+      g.fillStyle = R.colors[b]; g.beginPath(); g.arc(cx, cy, r1, a - half, a + half); g.arc(cx, cy, r0, a + half, a - half, true); g.closePath(); g.fill();
+    });
+  }
+  g.font = '600 12px system-ui, sans-serif';
+  SECT.forEach((nm, s) => { if (s % 2) return; const a = s * 22.5 * DEG - Math.PI / 2;
+    g.fillStyle = s === 0 ? '#fca5a5' : '#b6c4d4'; g.fillText(nm, cx + Math.cos(a) * (rad + 12), cy + Math.sin(a) * (rad + 12)); });
+  // направление текущего часа: стрелка от края (откуда дует) к центру
+  const w = weatherAt(state.t), a = w.wd * DEG - Math.PI / 2;
+  const ex = cx + Math.cos(a) * rad * 0.98, ey = cy + Math.sin(a) * rad * 0.98;
+  g.strokeStyle = '#fbbf24'; g.lineWidth = 2.5; g.beginPath(); g.moveTo(ex, ey); g.lineTo(cx + Math.cos(a) * rad * 0.18, cy + Math.sin(a) * rad * 0.18); g.stroke();
+  const tipx = cx + Math.cos(a) * rad * 0.18, tipy = cy + Math.sin(a) * rad * 0.18, back = a;
+  g.fillStyle = '#fbbf24'; g.beginPath(); g.moveTo(tipx, tipy);
+  g.lineTo(tipx + Math.cos(back + 0.45) * 11, tipy + Math.sin(back + 0.45) * 11); g.lineTo(tipx + Math.cos(back - 0.45) * 11, tipy + Math.sin(back - 0.45) * 11); g.closePath(); g.fill();
+  g.lineWidth = 1;
+  $('roseStats').innerHTML = `${st.label}: n = ${st.n_hours} ч, средняя ${st.mean_speed_all.toFixed(1)} м/с, преобладает <b style="color:var(--text)">${st.prevailing.sector}</b> (${st.prevailing.pct.toFixed(0)} %). ` +
+    `<span style="color:var(--amber)">Стрелка</span> — прогноз текущего часа.`;
+}
+function setRose(k) { state.rose = k; $('roseAll').setAttribute('aria-pressed', k === 'all'); $('roseFeb').setAttribute('aria-pressed', k === 'feb'); drawRose(); }
+$('roseAll').onclick = () => setRose('all'); $('roseFeb').onclick = () => setRose('feb');
+
+// ---------------------------------------------------------------- управление
+function setPlaying(p) { state.playing = p; $('play').textContent = p ? '❚❚' : '▶'; }
+let lastHour = -1;
+function onTimeChanged(force) {
+  const k = Math.round(state.t);
+  if (force || k !== lastHour) { lastHour = k; updateReadouts(); drawRose(); }
+  drawChart();
+}
+$('play').onclick = () => setPlaying(!state.playing);
+$('prev').onclick = () => { setPlaying(false); state.t = clamp(Math.round(state.t) - 1, 0, hoursOf().length - 1); onTimeChanged(); };
+$('next').onclick = () => { setPlaying(false); state.t = clamp(Math.round(state.t) + 1, 0, hoursOf().length - 1); onTimeChanged(); };
+$('speed').onchange = e => { state.hps = +e.target.value; };
+const slider = $('slider');
+slider.addEventListener('input', () => { dragging = true; setPlaying(false); state.t = +slider.value; onTimeChanged(); });
+slider.addEventListener('change', () => { dragging = false; state.t = Math.round(+slider.value); slider.value = state.t; onTimeChanged(); });
+sel.onchange = () => { state.issue = +sel.value; slider.max = hoursOf().length - 1; state.t = clamp(state.t, 0, hoursOf().length - 1); updateIssueMeta(); onTimeChanged(true); };
+$('exag').oninput = e => { state.exag = +e.target.value; $('exagV').textContent = '×' + state.exag; rebuildWorld(false); };
+$('count').oninput = e => { state.count = +e.target.value; $('countV').textContent = state.count; };
+$('autorot').onchange = e => { controls.autoRotate = e.target.checked; };
+window.addEventListener('keydown', e => {
+  if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT' && e.target.type !== 'range') return;
+  if (e.code === 'Space') { e.preventDefault(); setPlaying(!state.playing); }
+  if (e.code === 'ArrowRight') { e.preventDefault(); $('next').click(); }
+  if (e.code === 'ArrowLeft') { e.preventDefault(); $('prev').click(); }
+});
+
+function rebuildWorld(resetCamera) {
+  buildTerrain(); placeTurbines();
+  const cy = toY(T.mean_m);
+  controls.target.set(0, cy, 0);
+  if (resetCamera) { camera.position.set(-6400, cy + 8200, 9800); }
+  controls.update();
+}
+function resize() {
+  const r = host.getBoundingClientRect();
+  renderer.setSize(r.width, r.height, false); camera.aspect = r.width / Math.max(1, r.height); camera.updateProjectionMatrix();
+  drawChart(); drawRose();
+}
+window.addEventListener('resize', resize);
+
+// ---------------------------------------------------------------- цикл
+rebuildWorld(true); updateIssueMeta(); resize(); setPlaying(true); onTimeChanged(true);
+const clock = new THREE.Clock();
+function frame() {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  simT += dt;
+  const n = hoursOf().length;
+  if (state.playing) { state.t += dt * state.hps; if (state.t > n - 1) state.t = 0; onTimeChanged(); }
+  const w = weatherAt(state.t);
+  stepParticles(dt, w);
+  turbines.forEach(tb => {
+    const target = Math.PI / 2 - w.wd * DEG;             // ротор смотрит против ветра (навстречу направлению «откуда»)
+    tb.yaw = tb.yaw == null ? target : tb.yaw + Math.atan2(Math.sin(target - tb.yaw), Math.cos(target - tb.yaw)) * Math.min(1, dt * 2);
+    tb.head.rotation.y = tb.yaw;
+    const p = tb.id === 't1' ? w.p50_t1 : tb.id === 't2' ? w.p50_t2 : w.p50;
+    tb.omega = lerp(tb.omega, 2.2 * clamp(p ?? w.p50, 0, 1), Math.min(1, dt * 1.5));   // рад/с ∝ P50
+    tb.rotor.rotation.x -= tb.omega * dt;
+  });
+  controls.update();
+  $('needle').style.transform = `rotate(${controls.getAzimuthalAngle() / DEG}deg)`;
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+window.__viz = { state, scene, camera, controls, weatherAt };
+</script>
+</body>
+</html>

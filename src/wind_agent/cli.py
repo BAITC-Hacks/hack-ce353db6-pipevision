@@ -39,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
 
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    for noisy in ("httpx", "httpcore", "openai", "urllib3"):   # HTTP-клиенты логируют каждый запрос — оставляем только предупреждения
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     from .weather import WeatherClient
     wx = WeatherClient(offline=a.offline)
 

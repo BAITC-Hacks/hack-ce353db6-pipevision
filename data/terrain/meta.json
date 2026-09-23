@@ -1,0 +1,27 @@
+{
+  "source": "Open-Meteo Elevation API (Copernicus DEM GLO-90)",
+  "url": "https://api.open-meteo.com/v1/elevation",
+  "center": {
+    "lat": 43.644174,
+    "lon": 78.537216
+  },
+  "half_size_m": 6000.0,
+  "step_m": 250.0,
+  "nx": 49,
+  "ny": 49,
+  "projection": "равнопромежуточная: x = (lon-lon0)·111320·cos(lat0), y = (lat-lat0)·111132",
+  "index": "i — на восток (x), j — на север (y); строки CSV упорядочены по j, затем по i",
+  "elevation_min_m": 524.0,
+  "elevation_max_m": 758.0,
+  "turbines": {
+    "t1": {
+      "lat": 43.64515,
+      "lon": 78.535604
+    },
+    "t2": {
+      "lat": 43.643198,
+      "lon": 78.538828
+    }
+  },
+  "fetched_at_utc": "2026-09-23 08:55:36"
+}

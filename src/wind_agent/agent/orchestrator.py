@@ -178,10 +178,14 @@ class AgentSession:
         if "analysis" not in self.state:
             self._ensure("analyze_forecast", by_llm)
             self.call("analyze_forecast", by_llm=by_llm)
-        if clean["decision"] == "recalculate" and self.recalc is None:
-            self.call("recalculate", by_llm=by_llm, reason=clean["reasoning"])
+        rules_decision, rules_reason = rule_decision(self.state["analysis"])
+        # guardrail: обязательный пересчёт по правилам выполняется всегда, даже если LLM решила его пропустить;
+        # решение LLM сохраняется рядом с решением правил, расхождение видно в отчёте
+        if self.recalc is None and (clean["decision"] == "recalculate" or rules_decision == "recalculate"):
+            why = clean["reasoning"] if clean["decision"] == "recalculate" else f"по правилам: {rules_reason}"
+            self.call("recalculate", by_llm=by_llm, reason=why)
+            rules_decision, rules_reason = rule_decision(self.state["analysis"])
         a, fc, meta = self.state["analysis"], self.state["forecast"], self.state["weather"]["meta"]
-        rules_decision, _ = rule_decision(a)
         dec = {"decision": clean["decision"], "reasoning": clean["reasoning"], "llm_used": by_llm, "model": self.llm_model or "",
                "rules_decision": rules_decision, "recalc": self.recalc}
         if self.live:
