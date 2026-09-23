@@ -67,14 +67,14 @@ def test_app_renders_offline(monkeypatch):
     assert not at.exception, [e.message for e in at.exception]
     assert at.title and "Нурлы" in at.title[0].value
     assert "result" in at.session_state and isinstance(at.session_state["result"].forecast, pd.DataFrame)
-    assert at.session_state["workspace"] == "Оператор" and at.chat_input
+    assert at.chat_input
     assert len(at.metric) == 3
     assert {e.label for e in at.expander} >= {"Спросить агента", "Почему такой прогноз и что изменилось", "Данные и проверка качества"}
-    at.session_state["workspace"] = "Исследование площадки"                  # второе рабочее пространство: карта и форма
-    at.run()
-    assert not at.exception, [e.message for e in at.exception]
+    # одна страница: карта Казахстана с формой площадки рядом с прогнозом «Нурлы», точка по умолчанию — «Нурлы»
     labels = [b.label for b in at.button]
-    assert "Исследовать площадку" in labels and "Вернуться к «Нурлы»" in labels
+    assert "Исследовать площадку" in labels and "Вернуться к «Нурлы»" in labels and "Рассчитать" in labels
+    assert abs(float(at.session_state["cand_lat"]) - 43.64) < 0.05 and abs(float(at.session_state["cand_lon"]) - 78.54) < 0.05
+    assert not at.sidebar.children if hasattr(at.sidebar, "children") else True   # параметры выпуска — на странице
 
 
 def test_operator_horizon_draft_and_recalculation(monkeypatch):

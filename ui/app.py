@@ -204,36 +204,37 @@ def open_issue(d) -> None:
 
 
 def sidebar() -> tuple[core.ForecastParams, bool]:
-    """Параметры выпуска для ВЭС «Нурлы». Своя площадка задаётся картой и формой на главной (режим live)."""
+    """Параметры выпуска ВЭС «Нурлы» — строкой на странице, а не в скрытом сайдбаре.
+    Своя площадка задаётся картой и формой ниже (режим live)."""
     caps = core.capabilities()
-    with st.sidebar:
-        st.markdown("**Выпуск · ВЭС «Нурлы»**")
-        mode = st.radio("Режим", list(MODE_LABELS), format_func=MODE_LABELS.get, horizontal=True, key="mode")
+    with st.container(border=True):
+        c = st.columns([1.6, 1.3, 0.6, 0.6, 1.0, 1.0, 1.0, 1.0], **_kw(st.columns, vertical_alignment="bottom"))
+        mode = c[0].radio("Режим", list(MODE_LABELS), format_func=MODE_LABELS.get, horizontal=True, key="mode")
         issue_date, issue_hour = core.REPLAY_DEFAULT, 23
         if mode == core.MODE_REPLAY:
             st.session_state.setdefault("issue_date", core.REPLAY_DEFAULT)   # значения задаём через state, а не value=:
             st.session_state.setdefault("issue_hour", 23)                    # их меняют кнопки D−1/D+1 и «Открыть выпуск»
-            issue_date = st.date_input("Дата выпуска", min_value=core.REPLAY_MIN, max_value=core.REPLAY_MAX,
-                                       key="issue_date", **_kw(st.date_input, format="DD.MM.YYYY"))
+            issue_date = c[1].date_input("Дата выпуска", min_value=core.REPLAY_MIN, max_value=core.REPLAY_MAX,
+                                         key="issue_date", **_kw(st.date_input, format="DD.MM.YYYY"))
             in_test = core.TEST_START <= issue_date <= core.TEST_END
-            b1, b2 = st.columns(2)
-            b1.button("← D−1", key="issue_prev", on_click=shift_issue, args=(-1,),
-                      disabled=not (in_test and issue_date > core.TEST_START), **_stretch(st.button))
-            b2.button("D+1 →", key="issue_next", on_click=shift_issue, args=(1,),
-                      disabled=not (in_test and issue_date < core.TEST_END), **_stretch(st.button))
-            issue_hour = st.selectbox("Час выпуска, UTC+5", list(range(24)), format_func=lambda h: f"{h:02d}:00",
-                                      key="issue_hour")
-            if issue_hour != 23 and not caps["issue_hour"]:
-                st.caption("Текущая версия ядра выпускает прогноз только в 23:00")
-        horizon = st.radio("Горизонт", [24, 48], index=1, horizontal=True, format_func=lambda h: f"{h} ч", key="horizon")
+            c[2].button("← D−1", key="issue_prev", on_click=shift_issue, args=(-1,),
+                        disabled=not (in_test and issue_date > core.TEST_START), **_stretch(st.button))
+            c[3].button("D+1 →", key="issue_next", on_click=shift_issue, args=(1,),
+                        disabled=not (in_test and issue_date < core.TEST_END), **_stretch(st.button))
+            issue_hour = c[4].selectbox("Час выпуска, UTC+5", list(range(24)), format_func=lambda h: f"{h:02d}:00",
+                                        key="issue_hour")
+        horizon = c[5].radio("Горизонт", [24, 48], index=1, horizontal=True, format_func=lambda h: f"{h} ч", key="horizon")
         has_key = core.llm_available()
-        use_llm = _toggle("AI-пояснения", value=False, disabled=not has_key, key="use_llm",
-                          on_change=activate_assistant,
-                          help="Агент объясняет результат и отвечает на вопросы. Режим не меняет точность модели прогноза."
-                          if has_key else "Для AI-пояснений нужен ключ OpenAI. Прогноз и ответы по правилам доступны.")
+        with c[6]:
+            use_llm = _toggle("AI-пояснения", value=False, disabled=not has_key, key="use_llm",
+                              on_change=activate_assistant,
+                              help="Агент объясняет результат и отвечает на вопросы. Режим не меняет точность модели прогноза."
+                              if has_key else "Для AI-пояснений нужен ключ OpenAI. Прогноз и ответы по правилам доступны.")
+        run = c[7].button("Рассчитать", type="primary", **_stretch(st.button))
+        if mode == core.MODE_REPLAY and issue_hour != 23 and not caps["issue_hour"]:
+            st.caption("Текущая версия ядра выпускает прогноз только в 23:00")
         if st.session_state.pop("_assistant_activated", False):
             st.markdown(motion.mode_activation_markup(), unsafe_allow_html=True)
-        run = st.button("Рассчитать", type="primary", **_stretch(st.button))
 
     params = core.ForecastParams(site=core.NURLY_KEY, mode=mode, issue_date=issue_date, issue_hour=int(issue_hour),
                                  horizon=int(horizon), use_llm=bool(use_llm and has_key))
@@ -439,13 +440,23 @@ def main_series(res: core.ForecastResult) -> str:
 
 def main_chart(res: core.ForecastResult, view: pd.DataFrame, title: str, key: str = "nurly") -> str:
     site, sel = res.site, main_series(res)
+    opts = list(res.series)
+    if len(opts) > 1:                                  # переключение между парком и турбинами площадки
+        seg = getattr(st, "segmented_control", None)
+        if seg is not None:
+            sel = seg("Ряд", opts, format_func=series_label, key=f"series_{key}",
+                      **_kw(seg, default=sel, required=True, label_visibility="collapsed")) or sel
+        else:
+            sel = st.radio("Ряд", opts, format_func=series_label, horizontal=True, key=f"series_{key}",
+                           **_kw(st.radio, label_visibility="collapsed"))
     unit = "mw" if site.capacity_mw(sel) else "frac"
-    st.markdown(f"**{esc(title)}**")
+    st.markdown(f"**{esc(title if sel == core.FARM else f'Прогноз мощности · турбина {series_label(sel)}')}**")
     d = view[view["turbine"] == sel]
     k = site.capacity_mw(sel) if unit == "mw" else 1.0
     fact = core.actual_for(view, sel, scada_actual()) if not site.transfer else None
     st.altair_chart(fan_chart(res, d, sel, k, unit, palette(), fact), **_stretch(st.altair_chart))
-    st.caption("Полоса — сумма почасовых границ турбин. Покрытие парка отдельно не проверено.")
+    if sel == core.FARM:
+        st.caption("Полоса — сумма почасовых границ турбин. Покрытие парка отдельно не проверено.")
     return unit
 
 
@@ -825,15 +836,13 @@ CITIES = [("Астана", 51.17, 71.43), ("Алматы", 43.24, 76.89), ("Шы
 
 
 def cand_defaults(grid: dict | None) -> None:
-    """Кандидат по умолчанию — ячейка атласа с наибольшим ветром на 100 м."""
+    """Точка по умолчанию — ВЭС «Нурлы» (центр турбин T1/T2): карта открывается на действующей площадке."""
     if "cand_lat" in st.session_state:
         return
-    lat, lon = 47.0, 52.0
-    if grid is not None:
-        c = grid["cells"].dropna(subset=["ws100_est"])
-        if len(c):
-            best = c.loc[c["ws100_est"].idxmax()]
-            lat, lon = float(best["lat"]), float(best["lon"])
+    try:
+        lat, lon = map(float, np.mean([p[1:] for p in core.nurly_points()], axis=0))
+    except Exception:  # noqa: BLE001
+        lat, lon = 43.64, 78.54
     st.session_state.update(cand_lat=round(lat, 2), cand_lon=round(lon, 2), cand_n=10, cand_mw=2.5, cand_name="")
 
 
@@ -910,7 +919,8 @@ def request_study() -> None:
 
 def back_to_nurly() -> None:
     st.session_state["active_study"] = None
-    st.session_state["workspace"] = "Оператор"
+    for k in ("cand_lat", "cand_lon"):                 # точка на карте — снова «Нурлы»
+        st.session_state.pop(k, None)
 
 
 def map_block(study: dict | None) -> None:
@@ -1386,6 +1396,7 @@ def study_space(res: core.ForecastResult | None, study: dict | None, req) -> Non
 
 
 def main() -> None:
+    title_slot = st.empty()                            # заголовок сверху; текст зависит от площадки — заполняем ниже
     params, run = sidebar()
     run = run or bool(st.session_state.pop("_run_now", False))
     if run or ("result" not in st.session_state and "error" not in st.session_state and not params.use_llm):
@@ -1395,17 +1406,14 @@ def main() -> None:
     req = st.session_state.pop("_study_req", None)
     studies = st.session_state.setdefault("studies", {})
     study = studies.get(st.session_state.get("active_study")) if st.session_state.get("active_study") else None
-    ws = st.session_state.get("workspace") or WS_OPER
-    page_header(res, study if ws == WS_STUDY else None, ws)
-    ws = workspace_switch()
-    if ws == WS_STUDY:
-        study_space(res, study, req)
-        hero_card(res, study, 48, ws)
+    title_slot.title(f"WindAgent · {study['params'].label if study else 'ВЭС «Нурлы»'}")
+    # Одна страница: 3D-сцена и карта Казахстана (по умолчанию — «Нурлы»); другая точка на карте → исследование,
+    # «Вернуться к «Нурлы»» — снова прогноз действующей станции.
+    study_space(res, study, req)
+    if study is not None:
+        hero_card(res, study, 48, WS_STUDY)
         with st.expander("Спросить агента о площадке"):
-            if study is None:
-                st.caption("Сначала исследуйте выбранную площадку: агенту нужны её данные.")
-            else:
-                agent_chat(None, study, 48)
+            agent_chat(None, study, 48)
     else:
         operator_space(res, params)
 
