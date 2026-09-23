@@ -1,0 +1,11 @@
+{
+  "block_days": 7,
+  "resamples": 2000,
+  "random_seed": 42,
+  "day_count": 62,
+  "mae_candidate_minus_baseline_95pct": [
+    -0.004198500833815576,
+    -0.0006096181466840106
+  ],
+  "interpretation": "Conditional exploratory uncertainty on this 62-day sample; does not establish generalization to new seasons or sites."
+}

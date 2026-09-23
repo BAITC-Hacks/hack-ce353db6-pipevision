@@ -55,14 +55,91 @@ def test_run_assessment_step_error_is_short(monkeypatch):
     assert out["errors"][core.STUDY_STEPS[2]] == "RuntimeError: нет сети"
 
 
-def test_app_renders_offline():
-    """Главная страница открывается: прогноз «Нурлы» из кэша, карта, форма площадки, вкладки — без исключений."""
+def test_app_renders_offline(monkeypatch):
+    """Первый экран и два рабочих пространства доступны без API-запросов."""
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    client_type = core.WeatherClient
+    monkeypatch.setattr(core, "WeatherClient", lambda **kw: client_type(offline=True))
     pytest.importorskip("streamlit")
     pytest.importorskip("plotly")
     from streamlit.testing.v1 import AppTest
     at = AppTest.from_file(str(UI / "app.py"), default_timeout=120).run()
     assert not at.exception, [e.message for e in at.exception]
     assert at.title and "Нурлы" in at.title[0].value
+    assert "result" in at.session_state and isinstance(at.session_state["result"].forecast, pd.DataFrame)
+    assert at.session_state["workspace"] == "Оператор" and at.chat_input
+    assert len(at.metric) == 3
+    assert {e.label for e in at.expander} >= {"Спросить агента", "Почему такой прогноз и что изменилось", "Данные и проверка качества"}
+    at.session_state["workspace"] = "Исследование площадки"                  # второе рабочее пространство: карта и форма
+    at.run()
+    assert not at.exception, [e.message for e in at.exception]
     labels = [b.label for b in at.button]
     assert "Исследовать площадку" in labels and "Вернуться к «Нурлы»" in labels
-    assert "result" in at.session_state and isinstance(at.session_state["result"].forecast, pd.DataFrame)
+
+
+def test_operator_horizon_draft_and_recalculation(monkeypatch):
+    """Смена горизонта фильтрует результат; дата остаётся черновиком до явного расчёта."""
+    from datetime import date
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    client_type = core.WeatherClient
+    monkeypatch.setattr(core, "WeatherClient", lambda **kw: client_type(offline=True))
+    at = AppTest.from_file(str(UI / "app.py"), default_timeout=120).run()
+    assert not at.exception
+    result = at.session_state["result"]
+    at.radio(key="horizon").set_value(24).run()
+    assert not at.exception
+    assert at.session_state["result"] is result
+    assert at.metric[0].label == "Выработка за 24 ч"
+    expected = core.operator_summary(result, 24)["message"]
+    assert any(expected in m.value for m in at.markdown)
+    at.session_state["issue_date"] = date(2026, 2, 6)
+    at.run()
+    assert any("Параметры изменены" in w.value for w in at.warning)
+    assert at.session_state["result"] is result
+    next(b for b in at.button if b.label == "Рассчитать").click().run()
+    assert not at.exception
+    assert at.session_state["result"].issue_label == "2026-02-06"
+    assert not any("Параметры изменены" in w.value for w in at.warning)
+    at.radio(key="detail_section").set_value("Факт и точность").run()
+    assert not at.exception
+    validation = core.historical_validation(forecast_model_sha256=at.session_state["result"].meta["model_sha256"])
+    assert validation["status"] == "verified"
+    metric = next(m for m in at.metric if m.label == "Средняя ошибка, % номинала")
+    assert metric.value == f"{100 * validation['metrics']['overall']['model']['mae']:.1f}"
+    assert any("не измерение точности выбранного выпуска" in c.value for c in at.caption)
+    at.chat_input[0].set_value("Насколько точный прогноз?").run()
+    assert not at.exception
+    assert any("не оценка точности" in m.value for m in at.markdown)
+
+
+@pytest.fixture(scope="module")
+def nurly_result():
+    """Выпуск «Нурлы» 10.02.2026 из кэша Open-Meteo, без LLM."""
+    return core.run_forecast(core.ForecastParams())
+
+
+def test_ask_agent_rules_without_key(monkeypatch, nurly_result):
+    """Без ключа OpenAI агент отвечает по правилам: энергия за 48 ч — числом из анализа, числа проходят сверку."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    out = core.ask_agent("Сколько энергии выработает парк за 48 ч?", nurly_result)
+    m = nurly_result.analysis["metrics"]["farm"]
+    assert out["llm_used"] is False
+    assert str(m["energy_48h_mwh"]) in out["answer"] and "МВт·ч" in out["answer"]
+    assert out["fact_check"]["checked"] > 0 and not out["fact_check"]["unverified"]
+    other = core.ask_agent("Расскажи анекдот", nurly_result)
+    assert "ключ OpenAI" in other["answer"]
+
+
+def test_agent_card_html_forecast_and_study(nurly_result):
+    """HTML карточки агента строится для выпуска и для исследования площадки; данные подставлены вместо метки."""
+    htm = core.agent_card_html(core.forecast_card(nurly_result), animate=True, intro=True, nonce="t")
+    assert "Агент WindAgent" in htm and core.CARD_DATA_MARK not in htm and "fetch_weather" in htm
+    study = {"params": core.StudyParams(47.0, 52.0, name="Атырау-1"), "assessment": None, "forecast_result": nurly_result,
+             "viz_html": None, "report": {"markdown": "# Оценка\n\n## Резюме\n\nПлощадка **перспективная**.\n\n## Площадка\n\nx",
+                                          "llm_used": False, "fact_check": {"checked": 3, "unverified": []}},
+             "errors": {core.STUDY_STEPS[1]: "RuntimeError: нет сети"}, "skipped": [], "timings": {}}
+    card = core.study_card(study)
+    assert [s["status"] for s in card["steps"]][:2] == ["ok", "error"] and card["message"] == "Площадка перспективная."
+    assert core.CARD_DATA_MARK not in core.agent_card_html(card, animate=False)

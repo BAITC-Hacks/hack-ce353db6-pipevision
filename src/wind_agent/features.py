@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from . import config
-from .data import utc_to_local
+from .data import utc_to_local, weather_neighbors
 from .terrain import directional_features
 
 R_DRY_AIR = 287.05  # Дж/(кг·К)
@@ -36,11 +36,13 @@ def make_features(df: pd.DataFrame) -> pd.DataFrame:
     for v in ["wind_speed_10m", "wind_speed_80m", "wind_speed_100m", "wind_speed_120m", "wind_gusts_10m",
               "temperature_2m", "surface_pressure"]:
         x[v] = df[v].astype(float)
-    # соседние часы внутри одной серии (одна турбина, один лаг), без утечки между сериями
-    grp = [df["turbine"].values, df["lead_day"].values] if "turbine" in df else [df["lead_day"].values]
+    # Training supplies context from the complete NWP series before SCADA filtering.
+    # Forecast input uses the same exact-hour/release/lead lookup; missing neighbors
+    # fall back to the current wind instead of jumping across gaps in the row order.
+    context = weather_neighbors(df)
     ws = df["wind_speed_100m"].astype(float)
-    x["ws100_prev"] = ws.groupby(grp).shift(1).fillna(ws)
-    x["ws100_next"] = ws.groupby(grp).shift(-1).fillna(ws)
+    for name in ("ws100_prev", "ws100_next"):
+        x[name] = df[name].astype(float) if name in df else context[name]
     x["ws100_cubed"] = ws ** 3
     x["shear"] = (df["wind_speed_120m"] / df["wind_speed_10m"].clip(lower=0.5)).clip(upper=10)
     x["gust_ratio"] = (df["wind_gusts_10m"] / df["wind_speed_10m"].clip(lower=0.5)).clip(upper=10)
