@@ -170,7 +170,7 @@ flowchart LR
 | `src/wind_agent/agent/llm.py` | LLM-слой: системный промпт, tool calling (до 8 шагов на выпуск, таймаут 60 с), валидация, fallback |
 | `src/wind_agent/agent/orchestrator.py` | `run_replay` (по датам выпуска, с передачей предыдущего выпуска), `run_live`; правила решения, журнал `agent_log.jsonl`, `replay_summary.csv`, `latest_by_target.csv` |
 | `src/wind_agent/cli.py` | командная строка `wind-agent` |
-| `scripts/make_figures.py` | графики бэктеста → `outputs/figures/*.png` |
+| `scripts/make_figures.py`, `scripts/make_replay_figures.py` | графики бэктеста и прогона тестового периода → `outputs/figures/*.png` |
 | `scripts/fetch_dem.py`, `scripts/build_viz_data.py`, `viz/` | рельеф (Copernicus DEM GLO-90 через Open-Meteo Elevation API) → `data/terrain/`; данные 3D-сцены → `viz/data/viz_data.js`, роза ветров → `viz/wind_rose.png` |
 | `tests/` | 16 офлайн-тестов: часовой пояс, SCADA, архивный прогноз «как в прошлом», признаки, модель, сквозной прогон агента без LLM и со сбоем LLM (fallback на правила, те же числа) |
 
@@ -334,6 +334,12 @@ wind-agent backtest
 - Решения LLM: 25 `accept`, 2 `flag` (09.02 и 24.02), 1 `recalculate` (20.02).
 - На всех трёх существенных ревизиях (20.02, 21.02, 24.02) агент выполнил `recalculate`. Повторный запрос показал, что вход не изменился, и прогноз подтверждён.
 - После `replay` у себя вы увидите изменения в `outputs/` (журнал, отчёты, сводка). Это ожидаемо: отчёты перезаписываются в выбранном режиме.
+
+Как выглядит результат прогона (`python scripts/make_replay_figures.py`): сшитый прогноз парка на весь февраль — на каждый час последний выпуск (горизонт 1–24 ч) с интервалом P10–P90 и прогноз предыдущего выпуска на тот же час (горизонт 25–48 ч); внизу — ревизия между ними.
+
+![Прогноз парка на тестовый период по 28 выпускам и ревизии](outputs/figures/replay_feb2026_farm.png)
+
+![Выработка по суткам и MAE ревизии по выпускам, решения агента](outputs/figures/replay_feb2026_issues.png)
 
 **Воспроизводимость проверена.** На macOS (arm64) результаты из чистого клона побитово совпадают с закоммиченными. Для бэктеста `git diff` пуст. В `replay` все 4032 значения P10/P50/P90 за 28 выпусков совпадают с `outputs/forecasts/`.
 
