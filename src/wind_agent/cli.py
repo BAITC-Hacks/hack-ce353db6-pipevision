@@ -17,20 +17,24 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--offline", action="store_true", help="не ходить в Open-Meteo, использовать только кэш")
     sub = p.add_subparsers(dest="cmd", required=True)
+    # те же флаги принимаются и после подкоманды: `wind-agent replay --offline --no-llm`
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("-v", "--verbose", action="store_true", default=argparse.SUPPRESS)
+    common.add_argument("--offline", action="store_true", default=argparse.SUPPRESS, help="только кэш Open-Meteo")
 
-    sub.add_parser("backtest", help="честный бэктест на дек.2025–янв.2026 (есть факт)")
-    sub.add_parser("train", help="обучить финальную модель на всей истории до 31.01.2026")
+    sub.add_parser("backtest", parents=[common], help="честный бэктест на дек.2025–янв.2026 (есть факт)")
+    sub.add_parser("train", parents=[common], help="обучить финальную модель на всей истории до 31.01.2026")
 
-    r = sub.add_parser("replay", help="воспроизвести ежедневные прогнозы тестового периода как в прошлом")
+    r = sub.add_parser("replay", parents=[common], help="воспроизвести ежедневные прогнозы тестового периода как в прошлом")
     r.add_argument("--start", default=config.TEST_ISSUE_START)
     r.add_argument("--end", default=config.TEST_ISSUE_END)
     r.add_argument("--no-llm", action="store_true", help="детерминированный режим без LLM")
 
-    f = sub.add_parser("forecast", help="один прогноз на дату выпуска (архивный прогноз погоды)")
+    f = sub.add_parser("forecast", parents=[common], help="один прогноз на дату выпуска (архивный прогноз погоды)")
     f.add_argument("--issue-date", required=True)
     f.add_argument("--no-llm", action="store_true")
 
-    lv = sub.add_parser("live", help="оперативный прогноз по текущему прогнозу погоды")
+    lv = sub.add_parser("live", parents=[common], help="оперативный прогноз по текущему прогнозу погоды")
     lv.add_argument("--no-llm", action="store_true")
 
     a = p.parse_args(argv)

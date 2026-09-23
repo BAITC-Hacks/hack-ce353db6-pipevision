@@ -23,8 +23,9 @@ from ..model import PowerModel
 
 log = logging.getLogger(__name__)
 
-SOURCE_ARCHIVE = "open-meteo/previous-runs"
-SOURCE_LIVE = "open-meteo/forecast"
+_ENS_LABEL = "/".join(m.split("_")[0].upper() for m in config.ENSEMBLE_MODELS)      # GFS/ICON/ECMWF
+SOURCE_ARCHIVE = f"open-meteo/previous-runs (best_match + {_ENS_LABEL})"
+SOURCE_LIVE = f"open-meteo/forecast (best_match + {_ENS_LABEL})"
 
 # Контракт файла прогноза outputs/forecasts/<issue_date>.csv — порядок колонок фиксирован
 FORECAST_COLUMNS = [
@@ -49,6 +50,11 @@ HIGH_LEVEL = 0.9                   # P50 ≥ 90 % номинала
 
 
 # ---------------------------------------------------------------- вспомогательное
+def ensemble_columns(df: pd.DataFrame) -> list[str]:
+    """Колонки моделей ансамбля `{model}_{var}` (GFS/ICON/ECMWF), которые вернул WeatherClient."""
+    return [c for c in df.columns if any(c.startswith(m + "_") for m in config.ENSEMBLE_MODELS)]
+
+
 @lru_cache(maxsize=1)
 def load_model() -> PowerModel:
     """Модель загружается один раз на процесс."""
@@ -82,9 +88,11 @@ def input_hash(frames: dict[str, pd.DataFrame]) -> str:
     h = hashlib.sha256()
     for t in sorted(frames):
         df = frames[t]
+        cols = list(config.WEATHER_VARS) + sorted(ensemble_columns(df))
         h.update(t.encode())
+        h.update(",".join(cols).encode())
         h.update(iso_utc(df["time"]).str.cat(sep="|").encode())
-        h.update(np.round(df[config.WEATHER_VARS].to_numpy(dtype=float), 3).tobytes())
+        h.update(np.round(df[cols].to_numpy(dtype=float), 3).tobytes())
     return h.hexdigest()[:16]
 
 
@@ -114,7 +122,7 @@ def _live_window(wx, turbine: str, now: pd.Timestamp) -> pd.DataFrame:
     raw = wx.live_forecast(turbine, forecast_days=3).set_index("time").sort_index()
     if raw.index.max() < targets[-1]:
         raw = wx.live_forecast(turbine, forecast_days=4).set_index("time").sort_index()
-    df = raw.reindex(targets)[config.WEATHER_VARS].reset_index(names="time")
+    df = raw.reindex(targets).reset_index(names="time")      # все колонки, включая ансамбль GFS/ICON/ECMWF
     df["target_local"] = utc_to_local(targets)
     df["lead_hours"] = np.arange(1, config.HORIZON_HOURS + 1)
     df["lead_day"] = np.where(df["lead_hours"] <= 24, 1, 2)
@@ -153,6 +161,9 @@ def fetch_weather(wx, issue_date: str | None = None, live: bool = False, now: pd
         "target_end_local": iso_local([first["time"].max()])[0],
         "n_hours": {t: int(len(df)) for t, df in frames.items()},
         "n_nan": {t: int(df[config.WEATHER_VARS].isna().sum().sum()) for t, df in frames.items()},
+        "ensemble_members": sorted({c.split("_wind_speed_100m")[0] for df in frames.values() for c in ensemble_columns(df)
+                                    if c.endswith("_wind_speed_100m") and df[c].notna().any()}),
+        "n_nan_ensemble": {t: int(df[ensemble_columns(df)].isna().sum().sum()) for t, df in frames.items()},
         "input_hash": input_hash(frames),
         "api_calls": int(wx.calls - calls0),
     }
@@ -171,20 +182,27 @@ def prepare_data(weather: dict) -> dict:
     """Проверить вход и построить признаки модели для каждой турбины.
 
     Проверки: нет пропусков (иначе интерполяция по времени), скорости ветра в [0, 60] м/с,
-    температура в [-50, 50] °C, давление в [700, 1100] гПа, 48 часов на турбину.
-    Возвращает {'features': {t: X}, 'frames': {t: очищенная погода}, 'notes': [замечания], 'meta': meta}.
+    температура в [-50, 50] °C, давление в [700, 1100] гПа, 48 часов на турбину. Колонки ансамбля
+    GFS/ICON/ECMWF проверяются так же; их пропуски — информационное замечание (make_features подставит best_match).
+    Возвращает {'features': {t: X}, 'frames': {t: очищенная погода}, 'notes': [замечания], 'info': [...], 'meta': meta}.
     """
-    features, clean, notes = {}, {}, []
+    features, clean, notes, info = {}, {}, [], []
     for t, df in weather["frames"].items():
-        d = df.copy()
+        d = df.copy()                                   # все колонки, включая ансамбль, — make_features их использует
+        ens = ensemble_columns(d)
         if len(d) != config.HORIZON_HOURS:
             notes.append(f"{t}: {len(d)} часов вместо {config.HORIZON_HOURS}")
         n_nan = int(d[config.WEATHER_VARS].isna().sum().sum())
         if n_nan:
             notes.append(f"{t}: {n_nan} пропусков во входе — заполнены интерполяцией по времени")
             d[config.WEATHER_VARS] = d[config.WEATHER_VARS].interpolate(limit_direction="both")
-        _check_range(d, SPEED_VARS, *SPEED_RANGE, t, "скорость ветра", notes)
-        _check_range(d, ["temperature_2m"], *TEMP_RANGE, t, "температура", notes)
+        n_nan_ens = int(d[ens].isna().sum().sum()) if ens else 0
+        if not ens:
+            info.append(f"{t}: колонок ансамбля GFS/ICON/ECMWF нет — модель использует только best_match")
+        elif n_nan_ens:
+            info.append(f"{t}: {n_nan_ens} пропусков в колонках ансамбля — подставлен best_match")
+        _check_range(d, SPEED_VARS + [c for c in ens if "wind_speed" in c], *SPEED_RANGE, t, "скорость ветра", notes)
+        _check_range(d, ["temperature_2m"] + [c for c in ens if c.endswith("temperature_2m")], *TEMP_RANGE, t, "температура", notes)
         _check_range(d, ["surface_pressure"], *PRESSURE_RANGE, t, "давление", notes)
         d["turbine"] = t
         X = make_features(d.set_index("time"))
@@ -192,7 +210,7 @@ def prepare_data(weather: dict) -> dict:
         if left:
             notes.append(f"{t}: {left} пропусков в признаках после подготовки (модель обработает их как пропуски)")
         features[t], clean[t] = X, d
-    return {"features": features, "frames": clean, "notes": notes, "meta": weather["meta"]}
+    return {"features": features, "frames": clean, "notes": notes, "info": info, "meta": weather["meta"]}
 
 
 # ---------------------------------------------------------------- 3. модель
@@ -258,7 +276,7 @@ def _hhmm(local_iso: str) -> str:
 
 
 def analyze_forecast(forecast: pd.DataFrame, previous_forecast: pd.DataFrame | None = None,
-                     history: dict | None = None, notes: list[str] | None = None) -> dict:
+                     history: dict | None = None, notes: list[str] | None = None, info: list[str] | None = None) -> dict:
     """Проверки и показатели прогноза: диапазоны, энергия, рампы, уверенность, климатология, ревизия.
 
     * значения в [0, 1] и P10 ≤ P50 ≤ P90;
@@ -272,6 +290,8 @@ def analyze_forecast(forecast: pd.DataFrame, previous_forecast: pd.DataFrame | N
     flags: list[dict] = []
     for n in notes or []:
         flags.append({"code": "input_quality", "level": "warning", "message": n})
+    for n in info or []:
+        flags.append({"code": "ensemble_gap", "level": "info", "message": n})
 
     # диапазоны и порядок квантилей
     q = forecast[["p10", "p50", "p90"]]
@@ -476,13 +496,18 @@ def write_report(issue_date: str, forecast: pd.DataFrame, analysis: dict, narrat
           f"- Источник погоды: `{first['weather_source']}`, хэш входа `{meta.get('input_hash', '—')}`",
           f"- Модель: `{first['model_version']}` (HistGradientBoosting, квантили P10/P50/P90, доля номинала)",
           f"- Решение агента: **{decision.get('decision', '—')}** — {DECISION_RU.get(decision.get('decision'), '')}; "
-          f"статус проверок: **{analysis['status']}**; LLM: {'да, ' + decision.get('model', '') if decision.get('llm_used') else 'нет (детерминированный режим)'}",
-          ""]
+          f"статус проверок: **{analysis['status']}**; LLM: {'да, ' + decision.get('model', '') if decision.get('llm_used') else 'нет (детерминированный режим)'}"]
+    if decision.get("llm_used") and decision.get("rules_decision") and decision["rules_decision"] != decision.get("decision"):
+        L.append(f"- Решение по детерминированным правилам: {decision['rules_decision']} (LLM решила иначе, см. обоснование)")
+    L.append("")
 
     L += ["## Выработка по суткам", "",
           "Часы номинала: сумма почасовой нормированной мощности (1.0 = 1 ч на номинале). "
           "P50 и в скобках [сумма P10 – сумма P90].", ""]
-    rows = [[f"{day} (D+{i + 1})"] + [_energy_cell(m[s], day) for s in SERIES] for i, day in enumerate(days)]
+    hours = _series(forecast, "farm")["target_time_local"].str[:10].value_counts()
+    labels = [f"{day} (D+{i + 1})" if not live and hours.get(day, 0) == 24 else f"{day} ({hours.get(day, 0)} ч)"
+              for i, day in enumerate(days)]
+    rows = [[labels[i]] + [_energy_cell(m[s], day) for s in SERIES] for i, day in enumerate(days)]
     rows.append(["**Итого 48 ч**"] + [_energy_cell(m[s]) for s in SERIES])
     L += [_md_table(["Сутки (местные)", "Турбина 1", "Турбина 2", "Парк (среднее)"], rows), ""]
 
