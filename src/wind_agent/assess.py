@@ -161,9 +161,12 @@ def elevation(lat: float, lon: float, wx: WeatherClient) -> float | None:
         store[key] = val
         cache.write_text(json.dumps(store, indent=1), encoding="utf-8")
         return val
-    except Exception as e:  # noqa: BLE001
-        log.warning("высота площадки недоступна: %s", e)
-        return None
+    except Exception as e:  # noqa: BLE001 — лимит/недоступность Elevation API: высота ячейки атласа (MERRA-2, ~50 км)
+        log.warning("высота площадки недоступна: %s — беру высоту ячейки атласа", e)
+        try:
+            return float(atlas.nearest_cell(lat, lon)["elevation_m"])
+        except Exception:  # noqa: BLE001
+            return None
 
 
 def nurly_cf_actual(start: str | None = None, end: str | None = None) -> tuple[float | None, str]:
@@ -207,6 +210,11 @@ def assess_site(site: config.Site, wx: WeatherClient, start: str = "2025-01-01",
     warnings: list[str] = []
     step(1, "реанализ ERA5 в точке площадки")
     df = wx.archive_hourly(lat, lon, start, end)
+    wind_source = df.attrs.get("source", "era5")
+    if wind_source == "nasa_power":
+        warnings.append("Open-Meteo (ERA5) был недоступен (лимит запросов) — годовой ряд взят из NASA POWER "
+                        "(реанализ MERRA-2, сетка 0,5°, ветер 50 м пересчитан на 100 м): ошибка оценки выше, "
+                        "повторите расчёт позже для уточнения по ERA5")
     ws = df["wind_speed_100m"].astype(float)
     if ws.notna().sum() < 24 * 30:
         raise ValueError(f"мало данных ERA5 для площадки: {int(ws.notna().sum())} часов")
@@ -306,7 +314,10 @@ def assess_site(site: config.Site, wx: WeatherClient, start: str = "2025-01-01",
         "power_curve_source": curve["source"],
         "power_curve_calibrated_source": curve_hi["source"],
         "data_sources": [
-            f"Open-Meteo Archive API (реанализ ERA5), почасово {start}…{end}: ветер и направление 100 м, T 2 м, давление",
+            (f"Open-Meteo Archive API (реанализ ERA5), почасово {start}…{end}: ветер и направление 100 м, T 2 м, давление"
+             if wind_source == "era5" else
+             f"NASA POWER hourly (реанализ MERRA-2, 0,5°), почасово {start}…{end}: ветер 50 м → 100 м, T 2 м, давление "
+             "(запасной источник вместо ERA5)"),
             "Open-Meteo Elevation API (DEM Copernicus 90 м) — высота площадки",
             "NASA POWER Climatology (MERRA-2, 2001–2020) — атлас ветра Казахстана, WS50M",
             "SCADA ВЭС «Нурлы» (t1, t2) — кривая мощности и фактический КИУМ",
@@ -508,8 +519,10 @@ def management_report(a: dict, forecast_summary: dict | None = None, use_llm: bo
                          {"role": "user", "content": "Проверка чисел не пройдена. Эти числа отсутствуют в JSON оценки "
                           f"или получены пересчётом: {bad}. Перепиши отчёт, используя только числа из JSON "
                           "без округления и без собственных вычислений (не складывай и не пересчитывай величины)."}]
+        # сверка — для показанного текста (шаблона); отклонённые числа LLM — отдельно в llm_unverified
         return {"markdown": template, "llm_used": False,
-                "fact_check": {**check, "note": "текст LLM отклонён после повтора: неподтверждённые числа, возвращён шаблон"}}
+                "fact_check": {**base_check, "llm_unverified": check.get("unverified", []),
+                               "note": "текст LLM отклонён после повтора: неподтверждённые числа, возвращён шаблон"}}
     except Exception as e:  # noqa: BLE001 — LLM опциональна
         log.warning("LLM-отчёт не получен: %s", e)
         return {"markdown": template, "llm_used": False, "fact_check": {**base_check, "note": f"LLM недоступна: {e}"}}

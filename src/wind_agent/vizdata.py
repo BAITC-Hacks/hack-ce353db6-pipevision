@@ -101,14 +101,18 @@ def fetch_elevations(lat: list[float], lon: list[float], session, log: Callable[
 
     params = {"latitude": ",".join(f"{v:.6f}" for v in lat), "longitude": ",".join(f"{v:.6f}" for v in lon)}
     last = ""
+    waited = False
     for attempt in range(6):
         try:
             r = session.get(ELEVATION_URL, params=params, timeout=60)
-            if r.status_code == 429:           # минутный лимит Open-Meteo — ждём, пока окно сбросится
+            if r.status_code == 429:           # минутный лимит Open-Meteo — ждём один раз; повторный 429 = лимит часа/суток
                 last = r.text[:200]
+                if waited:
+                    raise RuntimeError("лимит Open-Meteo (429) не снялся за 65 с")
                 if log:
-                    log(f"лимит Open-Meteo (429), жду 65 с")
+                    log("лимит Open-Meteo (429), жду 65 с")
                 time.sleep(65)
+                waited = True
                 continue
             r.raise_for_status()
             elev = r.json()["elevation"]

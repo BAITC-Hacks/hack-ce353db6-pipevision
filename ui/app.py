@@ -1132,7 +1132,12 @@ def study_section(study: dict) -> None:
         c2.download_button("Скачать .md", data=str(rep["markdown"]).encode("utf-8"), file_name=f"report_{stem}.md",
                            mime="text/markdown", key="dl_study_md", **_stretch(st.download_button))
         fc = rep.get("fact_check") or {}
-        tech = ["LLM " + core.llm_model_name() if rep.get("llm_used") else "LLM не использовалась — шаблон по данным"]
+        if rep.get("llm_used"):
+            tech = ["LLM " + core.llm_model_name()]
+        elif fc.get("llm_unverified"):
+            tech = [f"текст LLM отклонён сверкой ({len(fc['llm_unverified'])} неподтв. чисел) — шаблон по данным"]
+        else:
+            tech = ["LLM не использовалась — шаблон по данным"]
         if fc:
             tech.append(f"сверка чисел: проверено {fc.get('checked', '—')}, не подтверждено {len(fc.get('unverified') or [])}")
         st.markdown(f'<div class="wa-tech">{esc(" · ".join(tech))}</div>', unsafe_allow_html=True)

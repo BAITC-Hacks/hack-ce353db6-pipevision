@@ -931,14 +931,20 @@ def run_assessment(p: StudyParams, wx: WeatherClient | None = None, progress=Non
             say(i, label, "skip")
             return None
         say(i, label, "run")
-        try:
-            r = fn()
-            say(i, label, "done")
-            return r
-        except Exception as e:  # noqa: BLE001 — короткое сообщение в панель, без трейсбека
-            out["errors"][label] = f"{type(e).__name__}: {str(e)[:200]}"
-            say(i, label, "error")
-            return None
+        for attempt in range(2):                # при лимите Open-Meteo (429) один повтор через 65 с
+            try:
+                r = fn()
+                say(i, label, "done")
+                return r
+            except Exception as e:  # noqa: BLE001 — короткое сообщение в панель, без трейсбека
+                if attempt == 0 and "429" in str(e):
+                    say(i, f"{label} · лимит Open-Meteo (429), повтор через 65 с", "run")
+                    time.sleep(65)
+                    continue
+                out["errors"][label] = f"{type(e).__name__}: {str(e)[:200]}"
+                say(i, label, "error")
+                return None
+        return None
 
     out["cell"] = step(0, lambda: dict(atlas.nearest_cell(p.lat, p.lon)), atlas is not None)
     out["assessment"] = step(1, lambda: assess.assess_site(site, wx, start=STUDY_START, end=STUDY_END, progress=sub(1)),

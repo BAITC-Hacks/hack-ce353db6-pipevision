@@ -24,6 +24,8 @@ PREVIOUS_RUNS_URL = "https://previous-runs-api.open-meteo.com/v1/forecast"
 HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"      # реанализ ERA5 — оценка ресурса новой площадки
+POWER_HOURLY_URL = "https://power.larc.nasa.gov/api/temporal/hourly/point"   # запасной источник: NASA POWER (MERRA-2)
+POWER_SHEAR_ALPHA = 0.143                                          # степенной закон 50 м → 100 м для ветра MERRA-2
 
 
 class WeatherClient:
@@ -145,8 +147,43 @@ class WeatherClient:
         key = cache_key or f"{lat:.3f}_{lon:.3f}"
         params = dict(latitude=lat, longitude=lon, start_date=start, end_date=end, hourly=",".join(variables),
                       models="era5", timezone="UTC", wind_speed_unit="ms")
-        df = self._cached_range(kind, key, start, end, lambda: self._get(ARCHIVE_URL, params))
-        return df.set_index("time")[variables]
+        source = "era5"
+        try:
+            df = self._cached_range(kind, key, start, end, lambda: self._get(ARCHIVE_URL, params))
+        except Exception as e:  # noqa: BLE001 — лимит/недоступность Open-Meteo: запасной реанализ NASA POWER
+            if self.offline or variables != default:
+                raise
+            log.warning("ERA5 (Open-Meteo) недоступен: %s — беру NASA POWER (MERRA-2)", e)
+            df = self._cached_range("nasapower", key, start, end, lambda: self._nasa_power_hourly(lat, lon, start, end))
+            source = "nasa_power"
+        out = df.set_index("time")[variables]
+        out.attrs["source"] = source
+        return out
+
+    def _nasa_power_hourly(self, lat: float, lon: float, start: str, end: str) -> pd.DataFrame:
+        """Запасной источник годового ряда: NASA POWER (MERRA-2, сетка 0.5°), почасово, UTC, без ключа и минутных лимитов.
+
+        Колонки приводятся к контракту archive_hourly: ветер 50 м → 100 м степенным законом, давление кПа → гПа.
+        """
+        if self.offline:
+            raise RuntimeError("offline mode: нет кэша NASA POWER для %.3f, %.3f" % (lat, lon))
+        self.calls += 1
+        params = {"parameters": "WS50M,WD50M,T2M,PS", "community": "RE", "longitude": lon, "latitude": lat,
+                  "start": start.replace("-", ""), "end": end.replace("-", ""), "format": "JSON", "time-standard": "UTC"}
+        r = requests.get(POWER_HOURLY_URL, params=params, timeout=max(self.timeout, 120))
+        r.raise_for_status()
+        p = r.json()["properties"]["parameter"]
+        keys = sorted(p["WS50M"])
+        df = pd.DataFrame({"time": pd.to_datetime(keys, format="%Y%m%d%H", utc=True),
+                           "wind_speed_100m": [p["WS50M"][k] for k in keys],
+                           "wind_direction_100m": [p["WD50M"][k] for k in keys],
+                           "temperature_2m": [p["T2M"][k] for k in keys],
+                           "surface_pressure": [p["PS"][k] for k in keys]})
+        df = df.replace(-999.0, float("nan"))
+        df["wind_speed_100m"] = df["wind_speed_100m"] * (100.0 / 50.0) ** POWER_SHEAR_ALPHA
+        df["surface_pressure"] = df["surface_pressure"] * 10.0
+        df.attrs["grid"] = (lat, lon, None)
+        return df
 
     def prefetch(self, start: str = "2026-01-30", end: str = "2026-03-02") -> None:
         """Один запрос на весь тестовый период для каждой турбины и модели, чтобы не плодить мелкие файлы кэша."""
