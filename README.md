@@ -293,7 +293,7 @@ git clone https://github.com/BAITC-Hacks/hack-ce353db6-pipevision.git && cd hack
 uv venv --python 3.11 && uv pip install -e ".[dev]" -c requirements.lock && source .venv/bin/activate
 #    без uv: python3.11 -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]" -c requirements.lock
 
-# 2. тесты (офлайн, меньше минуты; первый запуск дольше — Python компилирует библиотеки)
+# 2. тесты (офлайн, около минуты; первый запуск дольше — Python компилирует библиотеки)
 pytest -q
 
 # 3. агент на трёх датах выпуска: без сети, без LLM (≈2 с)
@@ -324,8 +324,8 @@ wind-agent replay --no-llm --offline
 
 # 5. честный бэктест с эталоном (≈0,5–1 мин, random_state=42)
 wind-agent backtest
-# ожидаемый вывод (MAE в долях номинала):
-# {"model": 0.1754..., "power_curve": 0.2103..., "persistence": 0.3732...}
+# ожидаемый вывод (MAE в долях номинала и покрытие интервала, %):
+# {"model": 0.1754..., "power_curve": 0.2103..., "persistence": 0.3732..., "coverage_p10_p90_pct": 73.4...}
 ```
 
 Итог шага 4 в режиме `--no-llm`, решения по правилам (проверено в чистом клоне): 28 выпусков без ошибок, в среднем 22,2 часа номинала на парк за 48 ч.
