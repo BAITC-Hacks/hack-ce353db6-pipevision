@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from pathlib import Path
 
 import numpy as np
@@ -474,7 +475,18 @@ LLM_SYSTEM = """Ты — аналитик по ветроэнергетике. �
 «## Ожидаемая выработка и сравнение с «Нурлы»», «## Сезонность и режим», «## Риски и ограничения», «## Рекомендация».
 Первая строка — заголовок «# Оценка площадки ВЭС: <название>». Используй ТОЛЬКО числа из JSON (можно округлять, доли
 писать в процентах); не придумывай стоимость, тарифы, окупаемость и другие величины, которых нет в JSON.
-Пиши деловым языком, конкретно; объясни, что значат цифры для решения о строительстве; честно перечисли ограничения."""
+Пиши деловым русским языком для руководителей, которые не видят JSON: НИКОГДА не цитируй имена полей и ключей
+(никаких «ws100.mean», «cf =», «aep_gwh», «n_turbines», «key:», «in_kazakhstan»), не пиши в стиле «поле = значение»,
+не упоминай слово JSON. Каждое число — в предложении с единицей измерения: «средняя скорость ветра на 100 м 7,1 м/с»,
+«КИУМ 42,6 %», «годовая выработка 93,3 ГВт·ч». Объясни, что значат цифры для решения о строительстве; честно перечисли
+ограничения. Ориентир по стилю и структуре — черновик по шаблону: перепиши его связно и глубже, а не дословно."""
+
+_JSONISH = re.compile(r"\b[a-z]+(?:_[a-z0-9]+)+\s*[:=]|\b[a-z]+\.[a-z]+\s*=|\bJSON\b|=\s*(?:true|false)\b")
+
+
+def _looks_like_json_dump(text: str) -> int:
+    """Сколько раз текст цитирует поля JSON («cf = 0.42», «ws100.mean =», «in_kazakhstan = true»)."""
+    return len(_JSONISH.findall(text))
 
 
 def management_report(a: dict, forecast_summary: dict | None = None, use_llm: bool = True) -> dict:
@@ -511,18 +523,26 @@ def management_report(a: dict, forecast_summary: dict | None = None, use_llm: bo
             if len(text) < 300 or "## Рекомендация" not in text:
                 raise ValueError("ответ LLM неполный")
             check = verify_narrative(text, facts)
-            if check["ok"]:
+            jsonish = _looks_like_json_dump(text)
+            if check["ok"] and jsonish <= 2:
                 return {"markdown": text, "llm_used": True,
                         "fact_check": {**check, "model": settings["model"], "attempts": attempt + 1}}
-            bad = ", ".join(str(x) for x in check.get("unverified", [])[:10])
+            notes = []
+            if not check["ok"]:
+                bad = ", ".join(str(x) for x in check.get("unverified", [])[:10])
+                notes.append(f"Проверка чисел не пройдена: этих чисел нет в данных оценки или они получены пересчётом: "
+                             f"{bad}. Бери значения ровно как в данных, не складывай и не пересчитывай величины.")
+            if jsonish > 2:
+                notes.append("Текст цитирует имена полей и пишет в стиле «поле = значение» — так нельзя: перепиши деловым "
+                             "русским языком, каждое число в предложении с единицей измерения, без имён полей и слова JSON.")
+            check["jsonish"] = jsonish
             messages += [{"role": "assistant", "content": text},
-                         {"role": "user", "content": "Проверка чисел не пройдена. Эти числа отсутствуют в JSON оценки "
-                          f"или получены пересчётом: {bad}. Перепиши отчёт, используя только числа из JSON "
-                          "без округления и без собственных вычислений (не складывай и не пересчитывай величины)."}]
+                         {"role": "user", "content": " ".join(notes) + " Перепиши отчёт целиком."}]
         # сверка — для показанного текста (шаблона); отклонённые числа LLM — отдельно в llm_unverified
+        why = "неподтверждённые числа" if not check.get("ok") else "стиль (цитирует поля данных)"
         return {"markdown": template, "llm_used": False,
                 "fact_check": {**base_check, "llm_unverified": check.get("unverified", []),
-                               "note": "текст LLM отклонён после повтора: неподтверждённые числа, возвращён шаблон"}}
+                               "note": f"текст LLM отклонён после повтора: {why}, возвращён шаблон"}}
     except Exception as e:  # noqa: BLE001 — LLM опциональна
         log.warning("LLM-отчёт не получен: %s", e)
         return {"markdown": template, "llm_used": False, "fact_check": {**base_check, "note": f"LLM недоступна: {e}"}}
