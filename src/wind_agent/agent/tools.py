@@ -439,6 +439,155 @@ def template_narrative(analysis: dict, meta: dict | None = None) -> str:
     return " ".join(s[:6])
 
 
+# ---------------------------------------------------------------- 5б. проверка фактов в нарративе
+_MONTHS_RU = "янв|фев|мар|апр|ма[йя]|июн|июл|авг|сен|окт|ноя|дек"      # основы: 11 февраля, 22‑фев, 5 мая
+# фрагменты, числа в которых не являются фактами прогноза: даты, время, часовой пояс, метки вида P50/t1/D+1/день1
+_SKIP_PATTERNS = [
+    re.compile(r"\d{4}[-‑–]\d{2}[-‑–]\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:[+\-]\d{2}:\d{2}|Z)?)?"),
+    re.compile(r"\b\d{1,2}\.\d{1,2}\.\d{2,4}\b"),
+    re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\b"),
+    re.compile(rf"\b\d{{1,2}}(?:\s*[–\-‑]\s*\d{{1,2}})?[\s\-‑–]*(?:{_MONTHS_RU})[а-яё]*\.?", re.IGNORECASE),
+    re.compile(r"UTC\s*[+\-−]\s*\d{1,2}", re.IGNORECASE),
+    re.compile(r"[A-Za-zА-Яа-яЁё_]+[+\-−]?\d+(?:[.,]\d+)?"),
+]
+_NUMBER_RE = re.compile(r"(?<![\w.,])(\d+(?:[.,]\d+)?)([ \u00a0\u202f]?(?:%|процент\w*|п\.\s?п\.))?", re.IGNORECASE)
+_SIGN_CONTEXT = set(" \t\n  ([:;=≈~/")
+FACT_ABS_TOL = 0.011     # допуск: ±0.011 абсолютно …
+FACT_REL_TOL = 0.03      # … или ±3 % относительно, или совпадение с округлением до 0–2 знаков
+
+
+_DAY_MONTH_RE = re.compile(r"(?<![\w.,])(\d{1,2})[.\-‑/](\d{1,2})(?!\w|[.,]\d)")
+
+
+def extract_numbers(text: str, date_pairs: set[tuple[int, int]] | None = None) -> tuple[list[tuple[str, float, bool]], int]:
+    """Числа из текста: [(как написано, значение, это процент)] и число пропущенных фрагментов.
+
+    Десятичный разделитель — точка или запятая; «−»/«-» перед числом — минус (если стоит после пробела/скобки),
+    «%», «процентов», «п.п.» после числа — процент. Годы, даты, время, UTC+5 и метки (P50, t1, D+1) не проверяются;
+    короткие даты «24.02», «16‑02» пропускаются, только если это день/месяц из `date_pairs` (даты выпуска и горизонта).
+    """
+    s = str(text)
+    skipped = 0
+    for pat in _SKIP_PATTERNS:
+        s, n = pat.subn(" ", s)
+        skipped += n
+    if date_pairs:
+        def _drop(m: re.Match) -> str:
+            nonlocal skipped
+            if (int(m.group(1)), int(m.group(2))) in date_pairs:
+                skipped += 1
+                return " "
+            return m.group(0)
+        s = _DAY_MONTH_RE.sub(_drop, s)
+    out = []
+    for m in _NUMBER_RE.finditer(s):
+        raw, i = m.group(1), m.start(1)
+        val = float(raw.replace(",", "."))
+        sign = ""
+        if i > 0 and s[i - 1] in "-−+" and (i == 1 or s[i - 2] in _SIGN_CONTEXT):
+            sign = "-" if s[i - 1] in "-−" else "+"
+            val = -val if sign == "-" else val
+        if not sign and re.fullmatch(r"(19|20)\d\d", raw):     # год
+            skipped += 1
+            continue
+        pct = bool(m.group(2))
+        out.append((sign + raw + ("%" if pct else ""), val, pct))
+    return out, skipped
+
+
+def _allowed_numbers(analysis: dict, forecast: pd.DataFrame | None = None) -> np.ndarray:
+    """«Допустимые» числа: все показатели анализа (t1/t2/farm, ревизия, флаги), производные величины,
+    агрегаты прогноза и константы протокола; знаковые величины — ещё и по модулю. Проценты в тексте
+    сравниваются с долями делением на 100 (в verify_narrative), поэтому доли здесь не умножаются."""
+    vals: list[float] = []
+
+    def add(v) -> None:
+        if v is None or isinstance(v, (bool, str)):
+            return
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return
+        if not np.isfinite(v):
+            return
+        vals.extend([v, abs(v)])
+
+    # константы протокола и пороги проверок; 10/100 — высоты «ветер 10 м / 100 м»
+    for c in (0, 1, 2, 10, 100, 24, config.HORIZON_HOURS, len(config.TURBINES), HIGH_LEVEL, CALM_LEVEL,
+              RAMP_THRESHOLD, REVISION_MAE_THRESHOLD, WIDE_BAND_THRESHOLD, CALM_MIN_HOURS):
+        add(c)
+    hours = (analysis.get("checks") or {}).get("hours_per_series") or {}
+    for s, m in (analysis.get("metrics") or {}).items():
+        for v in m.values():
+            for vv in (v.values() if isinstance(v, dict) else [v]):
+                add(vv)
+        n = hours.get(s, config.HORIZON_HOURS)
+        add(n)
+        add(m.get("share_high", 0) * n)                      # число часов ≥ 0.9 и ≤ 0.05
+        add(m.get("share_calm", 0) * n)
+        clim, mean = m.get("climatology_mean") or 0, m.get("mean_p50") or 0
+        if clim:
+            add(mean - clim)
+            add(mean / clim)
+        e1, e2 = m.get("energy_day1") or 0, m.get("energy_day2") or 0
+        add(e1 - e2)
+        if e1 > 0 and e2 > 0:
+            add(e1 / e2)
+            add(e2 / e1)
+    rev = analysis.get("revision") or {}
+    for s in SERIES:
+        for v in (rev.get(s) or {}).values():
+            add(v)
+    flags = analysis.get("flags") or []
+    add(len(flags))
+    add(sum(f.get("level") == "warning" for f in flags))
+    for f in flags:
+        for _, v, _ in extract_numbers(f.get("message", ""))[0]:
+            add(v)
+    if forecast is not None and len(forecast):
+        for _, g in forecast.groupby("turbine"):
+            add(len(g))
+            for col in ("p10", "p50", "p90"):
+                add(g[col].min())
+                add(g[col].max())
+        fd = forecast[forecast["turbine"] == "farm"]
+        for col in ("wind_speed_100m", "wind_speed_10m", "wind_gusts_10m", "temperature_2m"):
+            if col in fd and len(fd):
+                add(fd[col].min())
+                add(fd[col].max())
+                add(fd[col].mean())
+    return np.array(vals, dtype=float)
+
+
+def _is_confirmed(x: float, allowed: np.ndarray, rounded: np.ndarray) -> bool:
+    d = np.abs(allowed - x)
+    return bool((d <= FACT_ABS_TOL).any() or (d <= FACT_REL_TOL * np.abs(allowed)).any()
+                or (np.abs(rounded - x) < 1e-9).any())
+
+
+def verify_narrative(narrative_ru: str, analysis: dict, forecast: pd.DataFrame | None = None) -> dict:
+    """Проверка фактов: каждое число нарратива должно подтверждаться анализом или прогнозом.
+
+    Число подтверждено, если совпадает с допустимым значением с допуском ±0.011 абсолютно или ±3 % относительно,
+    либо с этим значением, округлённым до 0–2 знаков; проценты сравниваются и как %, и как доли (÷100).
+    Возвращает {'ok': bool, 'unverified': [числа как в тексте], 'checked': n, 'skipped': m}.
+    """
+    allowed = _allowed_numbers(analysis, forecast)
+    rounded = np.array([float(f"{v:.{k}f}") for v in allowed for k in (0, 1, 2)]
+                       + [round(v, k) for v in allowed for k in (0, 1, 2)], dtype=float)
+    dates = list(analysis.get("days") or [])
+    if forecast is not None and "issue_date" in forecast and len(forecast):
+        dates.append(str(forecast["issue_date"].iloc[0]))
+    pairs = {(int(d[8:10]), int(d[5:7])) for d in dates if len(d) >= 10}
+    # числа дня месяца и месяца дат выпуска/горизонта («22–23 февраля», «сутки 22») — не факты анализа
+    day_nums = np.array([float(x) for d, mth in pairs for x in (d, mth)], dtype=float)
+    allowed = np.concatenate([allowed, day_nums]) if len(day_nums) else allowed
+    numbers, skipped = extract_numbers(narrative_ru, pairs)
+    unverified = [tok for tok, val, pct in numbers
+                  if not any(_is_confirmed(c, allowed, rounded) for c in ([val, val / 100] if pct else [val]))]
+    return {"ok": not unverified, "unverified": unverified, "checked": len(numbers), "skipped": skipped}
+
+
 # ---------------------------------------------------------------- 6. запись результатов
 def save_forecast(issue_date: str, forecast: pd.DataFrame, out_dir: Path | None = None, name: str | None = None) -> Path:
     """Сохранить прогноз в формате контракта: outputs/forecasts/<issue_date>.csv (или out_dir/<name>.csv)."""
@@ -535,6 +684,13 @@ def write_report(issue_date: str, forecast: pd.DataFrame, analysis: dict, narrat
     L.append("")
 
     L += ["## Комментарий агента", "", narrative.strip(), ""]
+    fact = decision.get("fact_check") or {}
+    if fact.get("note"):
+        L += [f"**{fact['note']}**", ""]
+    elif fact:
+        L += [f"*Проверка фактов:* все числа текста ({fact.get('checked', 0)}) подтверждены анализом.", ""]
+    if fact.get("rejected_narrative"):
+        L += ["<details><summary>Отклонённый текст LLM</summary>", "", "> " + fact["rejected_narrative"], "", "</details>", ""]
     if decision.get("reasoning"):
         L += [f"*Обоснование решения:* {decision['reasoning'].strip()}", ""]
     if decision.get("recalc"):

@@ -68,5 +68,6 @@ MIN_SAMPLES_PER_HOUR = 4
 
 # Бэктест с эталоном (факт есть только до 31.01.2026)
 BACKTEST_TRAIN_END = "2025-11-30"
+BACKTEST_CALIB_START = "2025-10-01"   # последние 2 месяца обучения — калибровка интервалов (конформная поправка)
 BACKTEST_TEST_START = "2025-12-01"
 BACKTEST_TEST_END = "2026-01-31"

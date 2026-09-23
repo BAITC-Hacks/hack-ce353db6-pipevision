@@ -47,7 +47,9 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "backtest":
         from .model import backtest
         res = backtest(wx)
-        print(json.dumps({k: res["overall"][k]["mae"] for k in res["overall"]}, indent=2))
+        out = {k: v["mae"] for k, v in res["overall"].items() if isinstance(v, dict)}
+        out["coverage_p10_p90_pct"] = res["overall"].get("coverage_p10_p90_pct")
+        print(json.dumps(out, indent=2))
     elif a.cmd == "train":
         from .model import train_final
         m = train_final(wx)

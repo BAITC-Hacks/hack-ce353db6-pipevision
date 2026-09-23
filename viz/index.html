@@ -175,7 +175,7 @@
       Ветер задан одним прогнозом Open-Meteo на 100 м для площадки ВЭС: направление и скорость одинаковы по всему квадрату,
       частицы держатся ~100 м над рельефом (с тем же вертикальным масштабом), движение ускорено ×120, лёгкий визуальный шум
       добавлен для читаемости. Обтекание рельефа, турбулентность и аэродинамические следы турбин <b>не моделируются</b>.
-      Турбины показаны увеличенными; позиции турбин парка, застройка и лес — из OpenStreetMap (вращение роторов парка — анимация).
+      Турбины показаны увеличенными; позиции турбин парка, застройка и лес — из OpenStreetMap (роторы парка вращаются со скоростью ∝ P50 парка).
       Рельеф: <span id="demSrc"></span>. Слои: <span id="osmSrc"></span>.
     </footer>
   </aside>
@@ -721,6 +721,9 @@ window.addEventListener('resize', resize);
 // ---------------------------------------------------------------- цикл
 rebuildWorld(true); updateIssueMeta(); resize(); setPlaying(true); onTimeChanged(true);
 const clock = new THREE.Clock();
+const YAW_TWEEN_S = 0.5;
+const angDiff = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));   // a − b по кратчайшей дуге, рад
+let yawTween = { from: null, to: null, t0: 0, cur: 0 };
 function frame() {
   const dt = Math.min(clock.getDelta(), 0.05);
   simT += dt;
@@ -728,12 +731,19 @@ function frame() {
   if (state.playing) { state.t += dt * state.hps; if (state.t > n - 1) state.t = 0; onTimeChanged(); }
   const w = weatherAt(state.t);
   stepParticles(dt, w);
+  // Рыскание: гондола и ротор (локальная ось +X) смотрят туда, ОТКУДА дует ветер текущего часа
+  // (wind_direction_100m, метеоконвенция). При смене часа — плавный доворот за YAW_TWEEN_S по кратчайшей дуге.
+  const Hc = hoursOf(), hc = Hc[clamp(Math.round(state.t), 0, Hc.length - 1)];
+  const yawTarget = Math.PI / 2 - (hc.wind_direction_100m ?? 0) * DEG, now = performance.now() / 1000;
+  if (yawTween.to == null) yawTween = { from: yawTarget, to: yawTarget, t0: now, cur: yawTarget };
+  else if (Math.abs(angDiff(yawTarget, yawTween.to)) > 1e-4) yawTween = { from: yawTween.cur, to: yawTarget, t0: now, cur: yawTween.cur };
+  const fy = clamp((now - yawTween.t0) / YAW_TWEEN_S, 0, 1), ease = fy * fy * (3 - 2 * fy);
+  yawTween.cur = yawTween.from + angDiff(yawTween.to, yawTween.from) * ease;
   allTurbines.forEach(tb => {
-    const target = Math.PI / 2 - w.wd * DEG;             // ротор смотрит против ветра (навстречу направлению «откуда»)
-    tb.yaw = tb.yaw == null ? target : tb.yaw + Math.atan2(Math.sin(target - tb.yaw), Math.cos(target - tb.yaw)) * Math.min(1, dt * 2);
-    tb.head.rotation.y = tb.yaw;
+    tb.head.rotation.y = yawTween.cur;
+    // скорость ротора ∝ P50: T1/T2 — свой прогноз, турбины парка — P50 парка
     const p = tb.id === 't1' ? w.p50_t1 : tb.id === 't2' ? w.p50_t2 : w.p50;
-    tb.omega = lerp(tb.omega, 2.2 * clamp(p ?? w.p50, 0, 1), Math.min(1, dt * 1.5));   // рад/с ∝ P50
+    tb.omega = lerp(tb.omega, 2.2 * clamp(p ?? w.p50, 0, 1), Math.min(1, dt * 1.5));   // рад/с
     tb.rotor.rotation.x -= tb.omega * dt;
   });
   controls.update();
@@ -742,7 +752,8 @@ function frame() {
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
-window.__viz = { state, scene, camera, controls, weatherAt };
+window.__viz = { state, scene, camera, controls, weatherAt, allTurbines,
+  rotorBearing: tb => { tb.head.updateWorldMatrix(true, false); const e = tb.head.matrixWorld.elements; return (Math.atan2(e[0], -e[2]) / DEG + 360) % 360; } };
 </script>
 </body>
 </html>

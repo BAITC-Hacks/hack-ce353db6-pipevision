@@ -171,6 +171,34 @@ class AgentSession:
             result["analysis"] = tools.analysis_brief(self.state["analysis"])
         return f"{verdict}; хэш {self.recalc['old_hash']} → {self.recalc['new_hash']}, max |ΔP50| {diff:.4f}", result
 
+    def _fact_check(self, narrative: str, analysis: dict, forecast: pd.DataFrame, by_llm: bool) -> tuple[str, dict]:
+        """Проверка фактов нарратива (шаг verify_narrative в трассе и журнале).
+
+        Текст LLM: 1 неподтверждённое число — текст остаётся с пометкой; 2 и более — заменяется шаблоном.
+        Шаблонный текст строится из тех же чисел анализа и проверку проходит всегда (см. tests/test_agent.py).
+        """
+        t0 = time.perf_counter()
+        fact = tools.verify_narrative(narrative, analysis, forecast)
+        bad = fact["unverified"]
+        fact.update(note=None, action="accepted", rejected_narrative=None, source="llm" if by_llm else "template")
+        if by_llm and len(bad) == 1:
+            fact.update(note=f"⚠ Не подтверждено анализом: {bad[0]}", action="annotated")
+            status, summary = "warning", f"проверено чисел {fact['checked']}, не подтверждено 1 ({bad[0]}) — текст LLM оставлен с пометкой"
+        elif by_llm and len(bad) >= 2:
+            fact.update(note=f"Комментарий LLM отклонён проверкой фактов (не подтверждено анализом: {', '.join(bad)}), "
+                             "использован шаблон", action="replaced", rejected_narrative=narrative, source="template")
+            narrative = tools.template_narrative(analysis)
+            status, summary = "warning", (f"проверено чисел {fact['checked']}, не подтверждено {len(bad)} ({', '.join(bad)}) — "
+                                          "нарратив LLM заменён шаблоном")
+            log.warning("%s: %s", self.issue_date, fact["note"])
+        elif bad:   # шаблон не прошёл проверку — сигнал об ошибке в самой проверке
+            status, summary = "warning", f"шаблон: не подтверждено {len(bad)} ({', '.join(bad)})"
+            log.warning("%s: шаблонный нарратив не прошёл проверку фактов: %s", self.issue_date, bad)
+        else:
+            status, summary = "ok", f"проверено чисел {fact['checked']}, все подтверждены анализом"
+        self._record("verify_narrative", status, t0, summary, by_llm)
+        return narrative, fact
+
     def _write_report(self, by_llm: bool = False, decision: str = "", reasoning: str = "", narrative_ru: str = ""):
         clean, err = llm.validate_final({"decision": decision, "reasoning": reasoning, "narrative_ru": narrative_ru})
         if clean is None:
@@ -186,16 +214,17 @@ class AgentSession:
             self.call("recalculate", by_llm=by_llm, reason=why)
             rules_decision, rules_reason = rule_decision(self.state["analysis"])
         a, fc, meta = self.state["analysis"], self.state["forecast"], self.state["weather"]["meta"]
+        narrative, fact = self._fact_check(clean["narrative_ru"], a, fc, by_llm)
         dec = {"decision": clean["decision"], "reasoning": clean["reasoning"], "llm_used": by_llm, "model": self.llm_model or "",
-               "rules_decision": rules_decision, "recalc": self.recalc}
+               "rules_decision": rules_decision, "recalc": self.recalc, "fact_check": fact}
         if self.live:
             csv_path = tools.save_forecast(self.issue_date, fc, out_dir=LIVE_DIR, name=self.out_name)
-            md_path = tools.write_report(self.issue_date, fc, a, clean["narrative_ru"], meta=meta, decision=dec,
+            md_path = tools.write_report(self.issue_date, fc, a, narrative, meta=meta, decision=dec,
                                          trace=self.trace, out_dir=LIVE_DIR, name=self.out_name)
         else:
             csv_path = tools.save_forecast(self.issue_date, fc)
-            md_path = tools.write_report(self.issue_date, fc, a, clean["narrative_ru"], meta=meta, decision=dec, trace=self.trace)
-        self.final = dict(dec, narrative=clean["narrative_ru"], csv=str(csv_path), report=str(md_path))
+            md_path = tools.write_report(self.issue_date, fc, a, narrative, meta=meta, decision=dec, trace=self.trace)
+        self.final = dict(dec, narrative=narrative, csv=str(csv_path), report=str(md_path))
         rel = lambda p: str(Path(p).relative_to(config.ROOT)) if str(p).startswith(str(config.ROOT)) else str(p)  # noqa: E731
         return (f"решение {clean['decision']} ({'LLM' if by_llm else 'правила'}); {rel(md_path)}, {rel(csv_path)}",
                 {"status": "ok", "report": rel(md_path), "forecast_csv": rel(csv_path)})
