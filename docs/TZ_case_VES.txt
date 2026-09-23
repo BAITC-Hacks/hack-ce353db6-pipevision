@@ -1,0 +1,215 @@
+﻿RU
+Кейс: Agentic AI для прогнозирования выработки ВЭС
+
+
+Описание задачи
+Необходимо разработать Agentic AI-систему для прогнозирования почасовой выработки ветроэлектростанции (ВЭС) на горизонте 24–48 часов.
+
+
+Участникам предоставляются координаты и исторические данные работы ВЭС с марта 2023 года до 31 января 2026 года включительно. 
+
+
+Необходимо выполнить прогнозирование за тестовый период с 1 февраля 2026 года по 28 февраля 2026 года.
+
+
+Предоставляемые данные
+* координаты турбины 1: https://maps.app.goo.gl/iN6svMt69D5qRpFU9
+* координаты турбины 2: https://maps.app.goo.gl/8UQMwsYavY6nLvFY8
+* статистическое время;
+* средняя скорость ветра, м/с;
+* нормализированная активная мощность на стороне линии;
+* средняя температура окружающей среды, °C.
+
+
+Задача участников
+Необходимо разработать решение, которое:
+1. На основании предоставленных исторических данных строит модель прогнозирования почасовой выработки ВЭС.
+2. Самостоятельно получает по координатам ВЭС из открытых источников погодные прогнозы, доступные на соответствующий момент прогнозирования.
+3. Формирует прогноз выработки ВЭС на следующие 24–48 часов с почасовой детализацией.
+4. Реализует процесс в формате Agentic AI, где система самостоятельно выполняет полный цикл:
+
+
+получение внешних погодных данных - подготовка данных - запуск модели прогнозирования - формирование почасового прогноза - анализ результата - повторный расчёт при обновлении входных данных.
+
+
+Выбор открытых источников погодных данных, ML-моделей, методов обработки данных и архитектуры AI-агента остаётся за участниками.
+
+
+Участникам необходимо воспроизвести процесс, как если бы прогноз выполнялся в прошлом:
+* на 31 января — сформировать прогноз на следующие 24–48 часов;
+* на 1 февраля — сформировать новый прогноз на следующие 24–48 часов;
+далее последовательно повторить прогнозирование в течение тестового периода.
+
+
+Для каждого прогнозного периода участники должны использовать архивные прогнозы погоды, которые были доступны на соответствующий момент времени, а не фактические погодные значения, ставшие известными позднее.
+________________
+
+
+
+
+Критерий
+	Что оцениваем
+	Баллы
+	Соответствие задаче и работоспособность
+	Оценивается, насколько решение соответствует поставленной задаче и позволяет реализовать основной заявленный сценарий.
+	25
+	Техническая реализация
+	Оценивается качество технической реализации решения: выбранный подход, архитектура, взаимодействие компонентов, использование AI/agentic AI и других технологий. Учитывается соответствие фактической реализации заявленной логике проекта.
+	25
+	README и воспроизводимость
+	Оценивается, насколько документация позволяет понять устройство проекта, используемые технологии, порядок запуска и основной сценарий работы. Также учитывается возможность воспроизвести и проверить решение на основании материалов репозитория.
+	25
+	Ценность и применимость решения
+	Оценивается, насколько решение отвечает обозначенной проблеме. Учитывается практическая применимость представленного подхода.
+	15
+	Потенциал развития и оригинальность подхода
+	Оценивается потенциал дальнейшего развития решения, его применения в более широком масштабе, а также наличие обоснованных нестандартных или оригинальных подходов к реализации задачи.
+	10
+	Итого
+	—
+	100
+	 
+
+
+KZ
+Кейс: ЖЭС өндірісін болжауға арналған Agentic AI
+
+
+Міндеттің сипаттамасы
+Жел электр станциясының (ЖЭС) 24–48 сағаттық көкжиектегі сағаттық өндірісін болжауға арналған Agentic AI-жүйесін әзірлеу қажет.
+
+
+Қатысушыларға ЖЭС координаттары және 2023 жылғы наурыздан 2026 жылғы 31 қаңтарды қоса алғанға дейінгі жұмысының тарихи деректері беріледі. 
+
+
+2026 жылғы 1 ақпаннан 2026 жылғы 28 ақпанға дейінгі тестілік кезеңге болжам жасау қажет.
+
+
+Берілетін деректер
+   * 1-турбинаның координаттары: https://maps.app.goo.gl/iN6svMt69D5qRpFU9
+   * 2-турбинаның координаттары: https://maps.app.goo.gl/8UQMwsYavY6nLvFY8
+   * статистикалық уақыт;
+   * желдің орташа жылдамдығы, м/с;
+   * желі жағындағы нормаланған активті қуат;
+   * қоршаған ортаның орташа температурасы, °C.
+
+
+Қатысушылардың міндеті
+Мынадай шешім әзірлеу қажет:
+   1. Берілген тарихи деректер негізінде ЖЭС-тің сағаттық өндірісін болжау моделін құрады.
+   2. ЖЭС координаттары бойынша ашық дереккөздерден болжам жасалатын сәтте қолжетімді ауа райы болжамдарын өз бетінше алады.
+   3. ЖЭС өндірісінің келесі 24–48 сағатқа арналған болжамын сағаттық егжей-тегжеймен қалыптастырады.
+   4. Процесті Agentic AI форматында іске асырады, мұнда жүйе толық циклды өз бетінше орындайды:
+
+
+сыртқы ауа райы деректерін алу - деректерді дайындау - болжау моделін іске қосу - сағаттық болжамды қалыптастыру - нәтижені талдау - кіріс деректері жаңартылған кезде қайта есептеу.
+
+
+Ауа райы деректерінің ашық дереккөздерін, ML-модельдерді, деректерді өңдеу әдістерін және AI-агент архитектурасын таңдау қатысушылардың өзінде қалады.
+
+
+Қатысушылар процесті болжам өткен уақытта жасалғандай етіп қайта жаңғыртуы қажет:
+   * 31 қаңтарға — келесі 24–48 сағатқа болжам қалыптастыру;
+   * 1 ақпанға — келесі 24–48 сағатқа жаңа болжам қалыптастыру;
+әрі қарай тестілік кезең бойы болжауды дәйекті түрде қайталау.
+
+
+Әрбір болжамдық кезең үшін қатысушылар тиісті уақыт сәтінде қолжетімді болған ауа райының мұрағаттық болжамдарын пайдалануы тиіс, кейінірек белгілі болған нақты ауа райы мәндерін емес.
+________________
+
+
+Критерий
+	Нені бағалаймыз
+	Ұпай
+	Тапсырмаға сәйкестігі және жұмыс істеу қабілеті
+	Шешімнің қойылған тапсырмаға қаншалықты сәйкес келетіні және мәлімделген негізгі сценарийді іске асыруға мүмкіндік беретіні бағаланады.
+	25
+	Техникалық іске асыру
+	Шешімнің техникалық іске асырылу сапасы бағаланады: таңдалған тәсіл, архитектура, компоненттердің өзара әрекеттесуі, AI/agentic AI және басқа технологияларды пайдалану. Нақты іске асырудың жобаның мәлімделген логикасына сәйкестігі ескеріледі.
+	25
+	README және қайта іске қосу мүмкіндігі
+	Құжаттаманың жоба құрылымын, пайдаланылған технологияларды, іске қосу тәртібін және негізгі жұмыс сценарийін түсінуге қаншалықты мүмкіндік беретіні бағаланады. Сондай-ақ репозиторий материалдары негізінде шешімді қайта іске қосу және тексеру мүмкіндігі ескеріледі.
+	25
+	Шешімнің құндылығы және қолданылуы
+	Шешімнің көрсетілген мәселені қаншалықты шешетіні бағаланады. Ұсынылған тәсілдің практикалық қолданылуы ескеріледі.
+	15
+	Даму әлеуеті және тәсілдің бірегейлігі
+	Шешімді одан әрі дамыту және оны кең ауқымда қолдану әлеуеті, сондай-ақ тапсырманы іске асырудағы негізделген стандарттан тыс немесе бірегей тәсілдердің болуы бағаланады.
+	10
+	Барлығы
+	—
+	100
+	 
+
+
+ 
+
+
+EN
+Case: Agentic AI for Wind Farm Generation Forecasting
+
+
+Task Description
+Develop an Agentic AI system for forecasting the hourly generation of a wind farm (WF) over a 24–48 hour horizon.
+
+
+Participants are provided with the wind farm coordinates and historical operating data from March 2023 through January 31, 2026 inclusive. 
+
+
+Forecasts must be produced for the test period from February 1, 2026 to February 28, 2026.
+
+
+Data Provided
+      * turbine 1 coordinates: https://maps.app.goo.gl/iN6svMt69D5qRpFU9
+      * turbine 2 coordinates: https://maps.app.goo.gl/8UQMwsYavY6nLvFY8
+      * statistical time;
+      * average wind speed, m/s;
+      * normalized active power on the line side;
+      * average ambient temperature, °C.
+
+
+Participants' Task
+Develop a solution that:
+      1. Builds a model for forecasting the wind farm's hourly generation based on the provided historical data.
+      2. Independently retrieves, using the wind farm coordinates, weather forecasts from open sources that were available at the relevant forecasting moment.
+      3. Produces a wind farm generation forecast for the next 24–48 hours at hourly resolution.
+      4. Implements the process as Agentic AI, where the system independently performs the full cycle:
+
+
+retrieving external weather data - preparing data - running the forecasting model - producing the hourly forecast - analyzing the result - recalculating when input data is updated.
+
+
+The choice of open weather data sources, ML models, data processing methods and AI agent architecture is up to the participants.
+
+
+Participants must reproduce the process as if the forecast were being made in the past:
+      * on January 31 — produce a forecast for the next 24–48 hours;
+      * on February 1 — produce a new forecast for the next 24–48 hours;
+then repeat the forecasting sequentially throughout the test period.
+
+
+For each forecast period, participants must use archived weather forecasts that were available at the corresponding point in time, not actual weather values that became known later.
+________________
+
+
+Criterion
+	What is evaluated
+	Points
+	Compliance with the task and functionality
+	The assessment considers how well the solution meets the assigned task and enables the main stated scenario to be implemented.
+	25
+	Technical implementation
+	The quality of the solution’s technical implementation is assessed, including the selected approach, architecture, interaction between components, and use of AI/agentic AI and other technologies. The consistency of the actual implementation with the stated project logic is taken into account.
+	25
+	README and reproducibility
+	The assessment considers whether the documentation makes it possible to understand the project structure, technologies used, launch procedure, and main operating scenario. The possibility of reproducing and checking the solution based on the repository materials is also taken into account.
+	25
+	Value and applicability of the solution
+	The assessment considers how well the solution addresses the stated problem. The practical applicability of the proposed approach is taken into account.
+	15
+	Development potential and originality of the approach
+	The assessment considers the potential for further development of the solution and its use at a broader scale, as well as the presence of well-founded unconventional or original approaches to implementing the task.
+	10
+	Total
+	—
+	100
