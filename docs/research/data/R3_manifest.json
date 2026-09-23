@@ -1,0 +1,14 @@
+{
+  "prediction_sha256": "b26904edab86e5b71e8ca138f83b245dd6523e99655d77f0b22a529aa37b5da2",
+  "metrics_sha256": "4b3e9c0cf8e490c1c6f8056b8f751946ab201947431a651f71fbb1b0bbba434e",
+  "n_rows": 5884,
+  "n_turbine_hours": 2942,
+  "n_unique_timestamps": 1479,
+  "local_start": "2025-12-01 05:00:00",
+  "local_end": "2026-01-31 23:00:00",
+  "unknown_ramp_rows": 28,
+  "valid_ramp_transitions": 5856,
+  "actual_ramp_rows": 384,
+  "power_error_wind_difference_correlation": 0.7251783284808535,
+  "worst_day": "2025-12-25"
+}
