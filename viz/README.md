@@ -9,6 +9,10 @@
 
 ![Роза ветров](wind_rose.png)
 
+![Карта площадки](site_map.png)
+
+![Наветренный сектор T1: след парка при западном ветре](site_map_wake.png)
+
 ## Что на странице
 
 - **3D-рельеф**: сетка высот 49 × 49 с шагом 250 м (квадрат ±6 км от середины между T1 и T2), окраска по высоте,
@@ -37,6 +41,7 @@
 .venv/bin/python scripts/fetch_osm_context.py  # OSM → data/terrain/osm_context.json (турбины, лес, застройка; один раз)
 .venv/bin/python scripts/build_viz_data.py     # → viz/data/viz_data.js и viz/wind_rose.png
 .venv/bin/python scripts/build_viz_data.py --sample   # принудительно ОБРАЗЕЦ прогнозов (модель + офлайн-кэш)
+.venv/bin/python scripts/make_site_map.py      # статичные карты viz/site_map.png и viz/site_map_wake.png (dpi 130)
 ```
 
 - `fetch_dem.py` берёт высоты из Open-Meteo Elevation API (Copernicus DEM GLO-90) пачками по 100 точек.
