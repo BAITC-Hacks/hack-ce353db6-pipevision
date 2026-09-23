@@ -21,6 +21,8 @@ help:
 	@echo "make backtest     честный бэктест дек.2025-янв.2026 -> outputs/backtest_metrics.json"
 	@echo "make train        переобучить финальную модель -> models/power_model.joblib"
 	@echo "make live         оперативный прогноз по текущему прогнозу погоды (нужна сеть)"
+	@echo "make assess       исследование площадки: make assess LAT=51.62 LON=73.10 N=20 MW=2.5 -> outputs/adhoc/<площадка>/"
+	@echo "make atlas        атлас ветра Казахстана (data/atlas, уже в репозитории; пересборка: wind-agent atlas --force)"
 	@echo "make setup-ui     доустановить streamlit для панели оператора (extra [ui])"
 	@echo "make ui           панель оператора ВЭС (Streamlit) на http://localhost:$(UI_PORT)"
 	@echo "make viz          данные для 3D-визуализации рельефа и поля ветра"
@@ -58,6 +60,18 @@ forecast:
 
 live:
 	$(WA) live
+
+# Исследование площадки: make assess LAT=51.62 LON=73.10 N=20 MW=2.5 (кэш ERA5 для этой точки есть в репозитории)
+LAT ?= 51.62
+LON ?= 73.10
+N ?= 20
+MW ?= 2.5
+.PHONY: assess atlas
+assess:
+	$(WA) assess --lat $(LAT) --lon $(LON) --n-turbines $(N) --rated-mw $(MW) --no-llm
+
+atlas:
+	$(WA) atlas
 
 # Панель оператора (Streamlit): extra [ui] не входит в основные зависимости — тесты и CLI его не тянут
 .PHONY: ui setup-ui

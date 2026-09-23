@@ -37,6 +37,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from wind_agent import config  # noqa: E402  (только чтение констант)
+# Общие функции сцены живут в пакете (их же зовёт панель оператора для любой площадки и выпуска)
+from wind_agent.vizdata import (  # noqa: E402,F401
+    bilinear, circ_mean_deg, farm_rows, forecasts_payload, m_per_deg_lon, rose_stats, to_local, _num,
+)
 
 TERRAIN_DIR = ROOT / "data" / "terrain"
 DEM_CSV = TERRAIN_DIR / "dem_grid.csv"
@@ -67,26 +71,6 @@ REQUIRED = ["issue_date", "target_time_local", "turbine", "p10", "p50", "p90",
             "wind_speed_100m", "wind_direction_100m", "temperature_2m"]
 WEATHER_COLS = ["wind_speed_100m", "wind_direction_100m", "wind_speed_10m", "wind_gusts_10m",
                 "temperature_2m", "surface_pressure"]
-
-
-# ------------------------------------------------------------------ геометрия
-def m_per_deg_lon(lat: float) -> float:
-    return 111_320.0 * math.cos(math.radians(lat))
-
-
-def to_local(lat: float, lon: float, lat0: float, lon0: float) -> tuple[float, float]:
-    """lat/lon → метры от центра (x — восток, y — север), та же проекция, что в fetch_dem.py."""
-    return (lon - lon0) * m_per_deg_lon(lat0), (lat - lat0) * M_PER_DEG_LAT
-
-
-def bilinear(elev: np.ndarray, x: float, y: float, x0: float, y0: float, step: float) -> float:
-    ny, nx = elev.shape
-    fi = min(max((x - x0) / step, 0), nx - 1.000001)
-    fj = min(max((y - y0) / step, 0), ny - 1.000001)
-    i, j = int(fi), int(fj)
-    di, dj = fi - i, fj - j
-    return float(elev[j, i] * (1 - di) * (1 - dj) + elev[j, i + 1] * di * (1 - dj)
-                 + elev[j + 1, i] * (1 - di) * dj + elev[j + 1, i + 1] * di * dj)
 
 
 # ------------------------------------------------------------------ рельеф
@@ -222,30 +206,6 @@ def _local_month(times_utc: pd.Series) -> np.ndarray:
         return (pd.DatetimeIndex(times_utc) + pd.Timedelta(hours=config.UTC_OFFSET_AFTER)).month
 
 
-def rose_stats(ws: np.ndarray, wd: np.ndarray, label: str) -> dict:
-    ok = np.isfinite(ws) & np.isfinite(wd)
-    ws, wd = ws[ok], np.mod(wd[ok], 360.0)
-    sector = (np.floor((wd + 11.25) / 22.5).astype(int)) % N_SECTORS      # 0 = С (348.75..11.25°)
-    sbin = np.digitize(ws, SPEED_EDGES)                                     # 0..4
-    counts = np.zeros((N_SECTORS, len(SPEED_LABELS)), dtype=int)
-    np.add.at(counts, (sector, sbin), 1)
-    n = int(counts.sum())
-    pct = counts / max(n, 1) * 100.0
-    mean_speed = [round(float(ws[sector == k].mean()), 2) if (sector == k).any() else 0.0 for k in range(N_SECTORS)]
-    sector_pct = pct.sum(axis=1)
-    k_max = int(sector_pct.argmax())
-    return {
-        "label": label, "n_hours": n,
-        "freq_pct": [[round(float(v), 3) for v in row] for row in pct],
-        "sector_pct": [round(float(v), 2) for v in sector_pct],
-        "mean_speed": mean_speed,
-        "mean_speed_all": round(float(ws.mean()), 2),
-        "calm_pct": round(float((ws < 1.0).mean() * 100), 2),
-        "prevailing": {"sector": SECTOR_NAMES[k_max], "deg": k_max * 22.5, "pct": round(float(sector_pct[k_max]), 1)},
-        "speed_bin_pct": [round(float(v), 2) for v in pct.sum(axis=0)],
-    }
-
-
 def build_wind_rose() -> dict:
     df = pd.read_csv(ROSE_SOURCE, usecols=["time", "wind_speed_100m", "wind_direction_100m"])
     df["time"] = pd.to_datetime(df["time"], utc=True)
@@ -262,26 +222,6 @@ def build_wind_rose() -> dict:
 
 
 # ------------------------------------------------------------------ прогнозы
-def circ_mean_deg(a: pd.Series) -> float:
-    r = np.deg2rad(a.astype(float))
-    return float(np.rad2deg(np.arctan2(np.sin(r).mean(), np.cos(r).mean())) % 360)
-
-
-def farm_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Строки парка: берём turbine == 'farm', если они есть, иначе среднее по t1/t2 (мощность в долях номинала)."""
-    if (df["turbine"] == "farm").any():
-        return df[df["turbine"] == "farm"].copy()
-    turb = df[df["turbine"].isin(list(config.TURBINES))]
-    agg = {c: "mean" for c in ["p10", "p50", "p90"] + [w for w in WEATHER_COLS if w in turb and w != "wind_direction_100m"]}
-    keys = [c for c in ["issue_date", "issue_time_utc", "target_time_utc", "target_time_local", "lead_hours", "lead_day"]
-            if c in turb]
-    out = turb.groupby(keys, as_index=False).agg(agg)
-    wd = turb.groupby(keys)["wind_direction_100m"].apply(circ_mean_deg).reset_index(drop=True)
-    out["wind_direction_100m"] = wd.values
-    out["turbine"] = "farm"
-    return out
-
-
 def make_sample(dates: list[str]) -> pd.DataFrame:
     """ОБРАЗЕЦ прогнозов в контракте outputs/forecasts: модель + офлайн-кэш Open-Meteo."""
     from wind_agent.features import make_features
@@ -346,63 +286,6 @@ def load_forecast_files() -> pd.DataFrame | None:
     return pd.concat(frames, ignore_index=True)
 
 
-def _num(v, nd=3):
-    try:
-        v = float(v)
-    except (TypeError, ValueError):
-        return None
-    return None if not math.isfinite(v) else round(v, nd)
-
-
-def forecasts_payload(df: pd.DataFrame) -> list[dict]:
-    df = df.copy()
-    # берём «настенное» время как есть: и «2026-02-11 00:00», и «2026-02-11T00:00:00+05:00» → «2026-02-11 00:00»
-    df["issue_date"] = df["issue_date"].astype(str).str.slice(0, 10)
-    df["target_time_local"] = df["target_time_local"].astype(str).str.slice(0, 16).str.replace("T", " ")
-    if "target_time_utc" in df:
-        df["target_time_utc"] = df["target_time_utc"].astype(str).str.slice(0, 16).str.replace("T", " ")
-    df["turbine"] = df["turbine"].astype(str).str.lower()
-    issues = []
-    for d, g in df.groupby("issue_date", sort=True):
-        farm = farm_rows(g).sort_values("target_time_local").drop_duplicates("target_time_local")
-        per_t = {t: g[g["turbine"] == t].drop_duplicates("target_time_local").set_index("target_time_local")
-                 for t in config.TURBINES}
-        hours = []
-        for _, r in farm.iterrows():
-            tl = r["target_time_local"]
-            rec = {
-                "target_local": tl,
-                "target_utc": str(r.get("target_time_utc", "")) if pd.notna(r.get("target_time_utc", None)) else None,
-                "lead_hours": int(r["lead_hours"]) if "lead_hours" in r and pd.notna(r["lead_hours"]) else None,
-                "lead_day": int(r["lead_day"]) if "lead_day" in r and pd.notna(r["lead_day"]) else None,
-                "wind_speed_100m": _num(r.get("wind_speed_100m"), 2),
-                "wind_direction_100m": _num(r.get("wind_direction_100m"), 1),
-                "wind_speed_10m": _num(r.get("wind_speed_10m"), 2),
-                "wind_gusts_10m": _num(r.get("wind_gusts_10m"), 2),
-                "temperature_2m": _num(r.get("temperature_2m"), 2),
-                "p50": _num(r["p50"], 4), "p10": _num(r["p10"], 4), "p90": _num(r["p90"], 4),
-            }
-            for t, tg in per_t.items():
-                rec[f"p50_{t}"] = _num(tg.at[tl, "p50"], 4) if tl in tg.index else None
-            hours.append(rec)
-        # погода парка могла отсутствовать в строках farm — добираем из t1
-        t1 = per_t.get("t1")
-        for rec in hours:
-            for c in ["wind_speed_100m", "wind_direction_100m", "temperature_2m", "wind_gusts_10m", "wind_speed_10m"]:
-                if rec[c] is None and t1 is not None and rec["target_local"] in t1.index and c in t1:
-                    rec[c] = _num(t1.at[rec["target_local"], c], 2)
-        first = g.iloc[0]
-        issues.append({
-            "issue_date": d,
-            "issue_time_utc": str(first.get("issue_time_utc", "")),
-            "weather_source": str(first.get("weather_source", "")),
-            "model_version": str(first.get("model_version", "")),
-            "n_hours": len(hours),
-            "hours": hours[:config.HORIZON_HOURS],
-        })
-    return issues
-
-
 # ------------------------------------------------------------------ PNG розы для README
 def draw_rose_png(rose: dict, path: Path) -> None:
     import matplotlib
@@ -438,37 +321,31 @@ def draw_rose_png(rose: dict, path: Path) -> None:
     plt.close(fig)
 
 
-# ------------------------------------------------------------------ main
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Собрать viz/data/viz_data.js для 3D-визуализации")
-    ap.add_argument("--sample", action="store_true", help="принудительно сгенерировать образец прогнозов")
-    ap.add_argument("--sample-dates", default=None,
-                    help="даты выпуска для образца через запятую (по умолчанию весь тестовый период 31.01–27.02.2026)")
-    ap.add_argument("--no-png", action="store_true", help="не рисовать viz/wind_rose.png")
-    args = ap.parse_args()
+# ------------------------------------------------------------------ сборка payload
+def load_forecasts(sample: bool = False, sample_dates: list[str] | None = None) -> tuple[pd.DataFrame, str]:
+    """Прогнозы для сцены: outputs/forecasts/*.csv, иначе (или при sample=True) — ОБРАЗЕЦ моделью по кэшу."""
+    fc = None if sample else load_forecast_files()
+    if fc is not None:
+        return fc, "outputs/forecasts"
+    if not sample:
+        print("outputs/forecasts/*.csv не найдены — собираю ОБРАЗЕЦ (--sample)")
+    dates = sample_dates or [d.strftime("%Y-%m-%d") for d in pd.date_range(config.TEST_ISSUE_START, config.TEST_ISSUE_END)]
+    return make_sample(dates), "sample"
 
+
+def build_payload(forecast: pd.DataFrame, source: str = "outputs/forecasts",
+                  rose: dict | None = None) -> dict:
+    """Полный payload window.VIZ_DATA для ВЭС «Нурлы»: рельеф, турбины, OSM, роза ветров и выпуски из forecast."""
     terrain, turbines = load_terrain()
     print(f"Рельеф: {terrain['nx']}×{terrain['ny']}, шаг {terrain['step_m']:.0f} м, "
           f"высоты {terrain['min_m']:.0f}–{terrain['max_m']:.0f} м ({terrain['source']})")
     osm = load_osm(terrain["center"]["lat"], terrain["center"]["lon"], turbines)
-    rose = build_wind_rose()
+    if rose is None:
+        rose = build_wind_rose()
     print(f"Роза ветров: {rose['all']['n_hours']} ч (весь период), {rose['feb']['n_hours']} ч (февраль); "
           f"преобладает {rose['all']['prevailing']['sector']}")
-
-    fc = None if args.sample else load_forecast_files()
-    source = "outputs/forecasts"
-    if fc is None:
-        if not args.sample:
-            print("outputs/forecasts/*.csv не найдены — собираю ОБРАЗЕЦ (--sample)")
-        if args.sample_dates:
-            dates = [d.strip() for d in args.sample_dates.split(",") if d.strip()]
-        else:
-            dates = [d.strftime("%Y-%m-%d") for d in pd.date_range(config.TEST_ISSUE_START, config.TEST_ISSUE_END)]
-        fc = make_sample(dates)
-        source = "sample"
-    issues = forecasts_payload(fc)
-
-    payload = {
+    issues = forecasts_payload(forecast)
+    return {
         "generated_at_utc": pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d %H:%M"),
         "local_tz": config.LOCAL_TZ_NAME,
         "power_units": "доля номинальной мощности (0–1); парк = среднее по T1 и T2",
@@ -481,16 +358,36 @@ def main() -> int:
         "wind_rose": rose,
         "forecasts": issues,
     }
-    OUT_JS.parent.mkdir(parents=True, exist_ok=True)
+
+
+def write_payload(payload: dict, path: Path = OUT_JS) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     js = ("// Сгенерировано scripts/build_viz_data.py — не редактировать вручную.\n"
           "window.VIZ_DATA = " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + ";\n")
-    OUT_JS.write_text(js, encoding="utf-8")
+    path.write_text(js, encoding="utf-8")
+    return path
+
+
+# ------------------------------------------------------------------ main
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Собрать viz/data/viz_data.js для 3D-визуализации")
+    ap.add_argument("--sample", action="store_true", help="принудительно сгенерировать образец прогнозов")
+    ap.add_argument("--sample-dates", default=None,
+                    help="даты выпуска для образца через запятую (по умолчанию весь тестовый период 31.01–27.02.2026)")
+    ap.add_argument("--no-png", action="store_true", help="не рисовать viz/wind_rose.png")
+    args = ap.parse_args()
+
+    dates = [d.strip() for d in args.sample_dates.split(",") if d.strip()] if args.sample_dates else None
+    fc, source = load_forecasts(args.sample, dates)
+    payload = build_payload(fc, source)
+    issues = payload["forecasts"]
+    write_payload(payload, OUT_JS)
     size_kb = OUT_JS.stat().st_size / 1024
     print(f"Готово: {OUT_JS.relative_to(ROOT)} ({size_kb:.0f} КБ), выпусков прогноза: {len(issues)} [{source}]")
     if size_kb > 3 * 1024:
         print("ВНИМАНИЕ: viz_data.js больше 3 МБ", file=sys.stderr)
     if not args.no_png:
-        draw_rose_png(rose, ROSE_PNG)
+        draw_rose_png(payload["wind_rose"], ROSE_PNG)
         print(f"Роза ветров PNG: {ROSE_PNG.relative_to(ROOT)}")
     return 0
 

@@ -1,0 +1,351 @@
+{
+  "site": {
+    "key": "c43p645_78p536",
+    "name": "ВЭС «Нурлы» (проверка метода)",
+    "lat": 43.64515,
+    "lon": 78.5356,
+    "n_turbines": 2,
+    "rated_mw": 2.5,
+    "capacity_mw": 5.0,
+    "transfer": true,
+    "in_kazakhstan": true
+  },
+  "elevation_m": 555.0,
+  "period": {
+    "start": "2025-01-01",
+    "end": "2025-12-31",
+    "hours": 8760
+  },
+  "ws100": {
+    "mean": 4.65,
+    "median": 4.45,
+    "p90": 8.16,
+    "max": 15.53
+  },
+  "weibull": {
+    "k": 1.87,
+    "c": 5.24
+  },
+  "monthly": [
+    {
+      "month": 1,
+      "name_ru": "январь",
+      "ws100_mean": 4.09,
+      "cf": 0.152
+    },
+    {
+      "month": 2,
+      "name_ru": "февраль",
+      "ws100_mean": 4.69,
+      "cf": 0.182
+    },
+    {
+      "month": 3,
+      "name_ru": "март",
+      "ws100_mean": 5.67,
+      "cf": 0.287
+    },
+    {
+      "month": 4,
+      "name_ru": "апрель",
+      "ws100_mean": 5.24,
+      "cf": 0.246
+    },
+    {
+      "month": 5,
+      "name_ru": "май",
+      "ws100_mean": 5.35,
+      "cf": 0.248
+    },
+    {
+      "month": 6,
+      "name_ru": "июнь",
+      "ws100_mean": 4.37,
+      "cf": 0.155
+    },
+    {
+      "month": 7,
+      "name_ru": "июль",
+      "ws100_mean": 4.16,
+      "cf": 0.135
+    },
+    {
+      "month": 8,
+      "name_ru": "август",
+      "ws100_mean": 4.62,
+      "cf": 0.168
+    },
+    {
+      "month": 9,
+      "name_ru": "сентябрь",
+      "ws100_mean": 4.23,
+      "cf": 0.163
+    },
+    {
+      "month": 10,
+      "name_ru": "октябрь",
+      "ws100_mean": 3.82,
+      "cf": 0.127
+    },
+    {
+      "month": 11,
+      "name_ru": "ноябрь",
+      "ws100_mean": 4.56,
+      "cf": 0.185
+    },
+    {
+      "month": 12,
+      "name_ru": "декабрь",
+      "ws100_mean": 5.03,
+      "cf": 0.222
+    }
+  ],
+  "diurnal": [
+    {
+      "hour_local": 0,
+      "ws100_mean": 4.45
+    },
+    {
+      "hour_local": 1,
+      "ws100_mean": 4.39
+    },
+    {
+      "hour_local": 2,
+      "ws100_mean": 4.35
+    },
+    {
+      "hour_local": 3,
+      "ws100_mean": 4.39
+    },
+    {
+      "hour_local": 4,
+      "ws100_mean": 4.25
+    },
+    {
+      "hour_local": 5,
+      "ws100_mean": 4.25
+    },
+    {
+      "hour_local": 6,
+      "ws100_mean": 4.31
+    },
+    {
+      "hour_local": 7,
+      "ws100_mean": 4.28
+    },
+    {
+      "hour_local": 8,
+      "ws100_mean": 4.41
+    },
+    {
+      "hour_local": 9,
+      "ws100_mean": 4.49
+    },
+    {
+      "hour_local": 10,
+      "ws100_mean": 4.56
+    },
+    {
+      "hour_local": 11,
+      "ws100_mean": 4.63
+    },
+    {
+      "hour_local": 12,
+      "ws100_mean": 4.65
+    },
+    {
+      "hour_local": 13,
+      "ws100_mean": 4.71
+    },
+    {
+      "hour_local": 14,
+      "ws100_mean": 4.83
+    },
+    {
+      "hour_local": 15,
+      "ws100_mean": 4.86
+    },
+    {
+      "hour_local": 16,
+      "ws100_mean": 4.94
+    },
+    {
+      "hour_local": 17,
+      "ws100_mean": 5.13
+    },
+    {
+      "hour_local": 18,
+      "ws100_mean": 5.25
+    },
+    {
+      "hour_local": 19,
+      "ws100_mean": 5.2
+    },
+    {
+      "hour_local": 20,
+      "ws100_mean": 5.08
+    },
+    {
+      "hour_local": 21,
+      "ws100_mean": 4.92
+    },
+    {
+      "hour_local": 22,
+      "ws100_mean": 4.74
+    },
+    {
+      "hour_local": 23,
+      "ws100_mean": 4.57
+    }
+  ],
+  "rose": [
+    {
+      "sector": "С",
+      "deg": 0.0,
+      "share": 0.0063,
+      "ws_mean": 1.5
+    },
+    {
+      "sector": "ССВ",
+      "deg": 22.5,
+      "share": 0.007,
+      "ws_mean": 1.64
+    },
+    {
+      "sector": "СВ",
+      "deg": 45.0,
+      "share": 0.0121,
+      "ws_mean": 2.09
+    },
+    {
+      "sector": "ВСВ",
+      "deg": 67.5,
+      "share": 0.0411,
+      "ws_mean": 2.95
+    },
+    {
+      "sector": "В",
+      "deg": 90.0,
+      "share": 0.3203,
+      "ws_mean": 5.38
+    },
+    {
+      "sector": "ВЮВ",
+      "deg": 112.5,
+      "share": 0.072,
+      "ws_mean": 3.02
+    },
+    {
+      "sector": "ЮВ",
+      "deg": 135.0,
+      "share": 0.0202,
+      "ws_mean": 1.41
+    },
+    {
+      "sector": "ЮЮВ",
+      "deg": 157.5,
+      "share": 0.0107,
+      "ws_mean": 1.03
+    },
+    {
+      "sector": "Ю",
+      "deg": 180.0,
+      "share": 0.0121,
+      "ws_mean": 1.2
+    },
+    {
+      "sector": "ЮЮЗ",
+      "deg": 202.5,
+      "share": 0.017,
+      "ws_mean": 1.67
+    },
+    {
+      "sector": "ЮЗ",
+      "deg": 225.0,
+      "share": 0.0357,
+      "ws_mean": 2.46
+    },
+    {
+      "sector": "ЗЮЗ",
+      "deg": 247.5,
+      "share": 0.1634,
+      "ws_mean": 4.69
+    },
+    {
+      "sector": "З",
+      "deg": 270.0,
+      "share": 0.2103,
+      "ws_mean": 6.19
+    },
+    {
+      "sector": "ЗСЗ",
+      "deg": 292.5,
+      "share": 0.053,
+      "ws_mean": 4.9
+    },
+    {
+      "sector": "СЗ",
+      "deg": 315.0,
+      "share": 0.0134,
+      "ws_mean": 2.54
+    },
+    {
+      "sector": "ССЗ",
+      "deg": 337.5,
+      "share": 0.0055,
+      "ws_mean": 1.94
+    }
+  ],
+  "prevailing_sector": "В",
+  "calm_share": 0.309,
+  "storm_share": 0.0,
+  "density_ratio": 0.945,
+  "density_ratio_to_curve": 1.0,
+  "cf": 0.189,
+  "aep_gwh": 8.29,
+  "aep_per_turbine_gwh": 4.15,
+  "full_load_hours": 1658,
+  "scenarios": {
+    "base": {
+      "cf": 0.189,
+      "aep_gwh": 8.29
+    },
+    "nurly_calibrated": {
+      "cf": 0.294,
+      "aep_gwh": 12.87
+    }
+  },
+  "benchmark": {
+    "nurly_cf_actual": 0.355,
+    "nurly_cf_actual_period": "2025-01-01…2025-12-31",
+    "nurly_cf_model": 0.189,
+    "nurly_cf_model_calibrated": 0.294,
+    "nurly_ws100_mean": 4.65,
+    "ratio_to_nurly": 1.0,
+    "cf_ratio_to_nurly_model": 1.0
+  },
+  "atlas": {
+    "ws50_ann": 4.23,
+    "ws100_est": 4.67,
+    "resource_class": "низкий",
+    "cell_lat": 43.5,
+    "cell_lon": 78.75,
+    "distance_km": 23.6,
+    "percentile_kz": 0.051,
+    "kz_max_ws100": 8.29
+  },
+  "power_curve_source": "кривая турбины «Нурлы» по SCADA: ветер анемометра → мощность t1+t2, бины 0.5 м/с, 48267 часов",
+  "power_curve_calibrated_source": "кривая, откалиброванная на «Нурлы»: прогнозный ветер 100 м (Open-Meteo) → факт мощности, 64206 часов 2024-02-16…2026-01-31",
+  "data_sources": [
+    "Open-Meteo Archive API (реанализ ERA5), почасово 2025-01-01…2025-12-31: ветер и направление 100 м, T 2 м, давление",
+    "Open-Meteo Elevation API (DEM Copernicus 90 м) — высота площадки",
+    "NASA POWER Climatology (MERRA-2, 2001–2020) — атлас ветра Казахстана, WS50M",
+    "SCADA ВЭС «Нурлы» (t1, t2) — кривая мощности и фактический КИУМ"
+  ],
+  "warnings": [
+    "кривая мощности — турбины «Нурлы» (2.5 МВт); для другой модели турбины и площадки без замеров оценка ориентировочная, нужна годовая мачта/лидар",
+    "ERA5 — реанализ с сеткой ~31 км: в горах и предгорьях занижает местный ветер, рельеф и шероховатость участка не учтены",
+    "проверка метода на «Нурлы»: ERA5 + кривая турбины дают КИУМ 0.189, откалиброванная кривая — 0.294, факт SCADA 0.355: в предгорьях ERA5 занижает ветер, базовый сценарий консервативен"
+  ],
+  "computed_at_utc": "2026-09-23T11:13:37Z"
+}

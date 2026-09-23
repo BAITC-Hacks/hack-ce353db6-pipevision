@@ -2,8 +2,10 @@
 
 Запуск из корня репозитория: `make ui` (или `.venv/bin/streamlit run ui/app.py`).
 Вся работа с ядром — в ui/core.py (run_forecast); здесь только ввод параметров и отображение.
-Каркас: шапка → 5 KPI → веерный график → вкладки «Предупреждения», «Таблицы и выгрузка», «Агент», «Площадка»,
-«Факт и точность», «3D-сцена» (viz/index.html). Пороги рамп, штиля и уверенности — из wind_agent.agent.tools (как у агента).
+Каркас: шапка → 3D-сцена текущей площадки и карта ветрового ресурса Казахстана (атлас, выбор точки кликом) →
+прогноз «Нурлы» (5 KPI, веерный график парка, «Почему такой прогноз») → «Исследование площадки» (оценка ресурса за год,
+прогноз 48 ч переносом модели, отчёт для руководства) → вкладки «Предупреждения», «Тестовый период», «Таблицы и выгрузка»,
+«Агент», «Факт и точность». Пороги рамп, штиля и уверенности — из wind_agent.agent.tools (как у агента).
 """
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ import inspect
 import json
 import sys
 import traceback
+from datetime import timedelta
 from pathlib import Path
 
 import altair as alt
@@ -23,6 +26,11 @@ try:                                    # st.components.v1.html устарева
     import streamlit.components.v1 as components
 except Exception:  # noqa: BLE001
     components = None
+
+try:                                    # карта Казахстана (extra [ui]); без plotly — только форма координат
+    import plotly.graph_objects as go
+except Exception:  # noqa: BLE001
+    go = None
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import core  # noqa: E402
@@ -103,6 +111,13 @@ st.markdown("""<style>
 .wa-alert-info{border-color:rgba(128,128,128,.5);background:rgba(128,128,128,.08)}
 .wa-sub{font-size:.78rem;opacity:.7;margin-top:-.3rem}
 .wa-sub-warn{color:#b45309;opacity:1}
+.wa-why{display:grid;grid-template-columns:max-content max-content 1fr;gap:.15rem .9rem;font-size:.85rem;margin:.1rem 0 .9rem;align-items:baseline}
+.wa-why-k{opacity:.65}
+.wa-why-v{font-weight:600;font-variant-numeric:tabular-nums}
+.wa-why-m{opacity:.85}
+[data-testid="stNumberInputStepDown"],[data-testid="stNumberInputStepUp"]{display:none}
+.wa-ph{display:flex;align-items:center;justify-content:center;border:1px solid rgba(128,128,128,.3);border-radius:.4rem;font-size:.85rem;opacity:.75;background:rgba(128,128,128,.06);text-align:center;padding:1rem}
+@media (max-width:700px){.wa-why{grid-template-columns:1fr;gap:0}.wa-why-m{margin-bottom:.35rem}}
 </style>""", unsafe_allow_html=True)
 
 
@@ -159,34 +174,42 @@ def metric(col, label: str, value: str, sub: str | None = None, delta: str | Non
 
 
 # ---------------------------------------------------------------- боковая панель
+def shift_issue(days: int) -> None:
+    """Кнопки «← D−1» / «D+1 →»: соседний выпуск тестового периода и сразу расчёт."""
+    new = (st.session_state.get("issue_date") or core.REPLAY_DEFAULT) + timedelta(days=days)
+    if core.TEST_START <= new <= core.TEST_END:
+        st.session_state["issue_date"] = new
+        st.session_state["_run_now"] = True
+
+
+def open_issue(d) -> None:
+    """«Открыть выпуск» во вкладке «Тестовый период»: «Нурлы», ретроспектива, 23:00 и расчёт."""
+    if d is None:
+        return
+    for k, v in (("mode", core.MODE_REPLAY), ("issue_date", d), ("issue_hour", 23), ("_run_now", True)):
+        st.session_state[k] = v
+
+
 def sidebar() -> tuple[core.ForecastParams, bool]:
+    """Параметры выпуска для ВЭС «Нурлы». Своя площадка задаётся картой и формой на главной (режим live)."""
     caps = core.capabilities()
     with st.sidebar:
-        site = st.radio("Площадка", list(SITE_LABELS), format_func=SITE_LABELS.get, key="site",
-                        help="«Нурлы»: T1, T2, модель обучена на SCADA. Своя площадка: перенос модели.")
-        custom = site == core.CUSTOM_KEY
-        lat, lon, n_turb, rated, name = 48.0, 68.0, 1, 2.5, ""
-        if custom:
-            c1, c2 = st.columns(2)
-            lat = c1.number_input("Широта, °", min_value=core.KZ_LAT[0], max_value=core.KZ_LAT[1], value=48.0, step=0.1,
-                                  format="%.3f", key="lat")
-            lon = c2.number_input("Долгота, °", min_value=core.KZ_LON[0], max_value=core.KZ_LON[1], value=68.0, step=0.1,
-                                  format="%.3f", key="lon")
-            c3, c4 = st.columns(2)
-            n_turb = int(c3.number_input("Турбин, шт.", min_value=1, max_value=50, value=1, step=1, key="n_turb"))
-            rated = float(c4.number_input("Номинал, МВт", min_value=0.5, max_value=8.0, value=2.5, step=0.1,
-                                          format="%.1f", key="rated"))
-            name = st.text_input("Название", value="", key="site_name")
-            if not caps["site"]:
-                st.caption("Своя площадка не поддерживается текущей версией ядра")
-        mode = st.radio("Режим", list(MODE_LABELS), format_func=MODE_LABELS.get, horizontal=True, key="mode",
-                        help="Ретроспектива — архивный прогноз погоды на момент выпуска; оперативный — последний запуск.")
+        st.markdown("**Выпуск · ВЭС «Нурлы»**")
+        mode = st.radio("Режим", list(MODE_LABELS), format_func=MODE_LABELS.get, horizontal=True, key="mode")
         issue_date, issue_hour = core.REPLAY_DEFAULT, 23
         if mode == core.MODE_REPLAY:
-            issue_date = st.date_input("Дата выпуска", value=core.REPLAY_DEFAULT, min_value=core.REPLAY_MIN,
-                                       max_value=core.REPLAY_MAX, key="issue_date", **_kw(st.date_input, format="DD.MM.YYYY"))
-            issue_hour = st.selectbox("Час выпуска", list(range(24)), index=23, format_func=lambda h: f"{h:02d}:00",
-                                      key="issue_hour", help="Местное время, UTC+5")
+            st.session_state.setdefault("issue_date", core.REPLAY_DEFAULT)   # значения задаём через state, а не value=:
+            st.session_state.setdefault("issue_hour", 23)                    # их меняют кнопки D−1/D+1 и «Открыть выпуск»
+            issue_date = st.date_input("Дата выпуска", min_value=core.REPLAY_MIN, max_value=core.REPLAY_MAX,
+                                       key="issue_date", **_kw(st.date_input, format="DD.MM.YYYY"))
+            in_test = core.TEST_START <= issue_date <= core.TEST_END
+            b1, b2 = st.columns(2)
+            b1.button("← D−1", key="issue_prev", on_click=shift_issue, args=(-1,),
+                      disabled=not (in_test and issue_date > core.TEST_START), **_stretch(st.button))
+            b2.button("D+1 →", key="issue_next", on_click=shift_issue, args=(1,),
+                      disabled=not (in_test and issue_date < core.TEST_END), **_stretch(st.button))
+            issue_hour = st.selectbox("Час выпуска, UTC+5", list(range(24)), format_func=lambda h: f"{h:02d}:00",
+                                      key="issue_hour")
             if issue_hour != 23 and not caps["issue_hour"]:
                 st.caption("Текущая версия ядра выпускает прогноз только в 23:00")
         horizon = st.radio("Горизонт", [24, 48], index=1, horizontal=True, format_func=lambda h: f"{h} ч", key="horizon")
@@ -195,8 +218,7 @@ def sidebar() -> tuple[core.ForecastParams, bool]:
                           help=f"OpenAI {core.llm_model_name()}, tool calling" if has_key else "OPENAI_API_KEY не задан")
         run = st.button("Рассчитать", type="primary", **_stretch(st.button))
 
-    params = core.ForecastParams(site=site, lat=float(lat), lon=float(lon), n_turbines=int(n_turb), rated_mw=float(rated),
-                                 name=name, mode=mode, issue_date=issue_date, issue_hour=int(issue_hour),
+    params = core.ForecastParams(site=core.NURLY_KEY, mode=mode, issue_date=issue_date, issue_hour=int(issue_hour),
                                  horizon=int(horizon), use_llm=bool(use_llm and has_key))
     return params, run
 
@@ -410,17 +432,148 @@ def fan_chart(res: core.ForecastResult, d: pd.DataFrame, series: str, k: float, 
     return alt.layer(alt.layer(*layers), wind).resolve_scale(y="independent").properties(height=320)
 
 
-def main_chart(res: core.ForecastResult, view: pd.DataFrame) -> str:
-    site = res.site
-    c1, c2 = st.columns([3, 2])
-    sel = c1.radio("Ряд", res.series, format_func=series_label, horizontal=True, key=f"series_{site.key}")
+def main_series(res: core.ForecastResult) -> str:
+    return core.FARM if core.FARM in res.series else res.series[0]
+
+
+def main_chart(res: core.ForecastResult, view: pd.DataFrame, title: str, key: str = "nurly") -> str:
+    """Веерный график ряда парка (по турбинам — только в таблицах); переключатель единиц МВт / доля номинала."""
+    site, sel = res.site, main_series(res)
+    c1, c2 = st.columns([3, 2], **_kw(st.columns, vertical_alignment="bottom"))
+    c1.markdown(f"**{esc(title)}**")
     units = (["mw"] if site.capacity_mw(sel) else []) + ["frac"]
-    unit = c2.radio("Единицы", units, format_func=UNIT_LABELS.get, horizontal=True, key=f"unit_{site.key}")
+    unit = c2.radio("Единицы", units, format_func=UNIT_LABELS.get, horizontal=True, key=f"unit_{key}",
+                    **_kw(c2.radio, label_visibility="collapsed"))
     d = view[view["turbine"] == sel]
     k = site.capacity_mw(sel) if unit == "mw" else 1.0
     fact = core.actual_for(view, sel, scada_actual()) if not site.transfer else None
     st.altair_chart(fan_chart(res, d, sel, k, unit, palette(), fact), **_stretch(st.altair_chart))
     return unit
+
+
+def file_stem(res: core.ForecastResult) -> str:
+    return f"{res.site.key}_{res.issue_label}" + ("" if res.params.mode == core.MODE_LIVE else f"T{res.params.issue_hour:02d}")
+
+
+def why_block(res: core.ForecastResult, view: pd.DataFrame) -> None:
+    """«Почему такой прогноз»: показатель — значение — что это значит для выработки (из данных, без LLM)."""
+    c1, c2 = st.columns([5, 1], **_kw(st.columns, vertical_alignment="bottom"))
+    c1.markdown("**Почему такой прогноз**")
+    c2.download_button("Отчёт .md", data=res.report_md.encode("utf-8"), file_name=f"report_{file_stem(res)}.md",
+                       mime="text/markdown", key="dl_md_main", disabled=not res.report_md, help="Отчёт агента",
+                       **_stretch(st.download_button))
+    lines = core.why_lines(res, view)
+    if lines:
+        body = "".join(f'<div class="wa-why-k">{esc(k)}</div><div class="wa-why-v">{esc(v)}</div><div class="wa-why-m">{esc(m)}</div>'
+                       for k, v, m in lines)
+        st.markdown(f'<div class="wa-why">{body}</div>', unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------- тестовый период
+@st.cache_data(show_spinner=False, max_entries=4)
+def replay_data(stamp: tuple):
+    return core.load_replay()
+
+
+def stitched_charts(df: pd.DataFrame, k: float, unit: str, pal: dict, window) -> tuple:
+    """Сшитый прогноз парка (последний выпуск на каждый час) и столбики ревизии к предыдущему выпуску."""
+    d = pd.DataFrame({"t": df["time_local"], "issue": df["issue_date"].astype(str), "lead": df["lead_hours"],
+                      "p10": df["p10"] * k, "p50": df["p50"] * k, "p90": df["p90"] * k,
+                      "prev": df["previous_p50"] * k, "rev": df["revision"] * k})
+    dom = [d["t"].min().isoformat(), d["t"].max().isoformat()]
+    x = alt.X("t:T", title=None, scale=alt.Scale(domain=dom), axis=alt.Axis(format="%d.%m", labelAngle=0, labelOverlap=True))
+    ytitle = "Мощность, МВт" if unit == "mw" else "Мощность, доля номинала"
+    ydom = alt.Scale(domain=[0, k])
+    names = ["P50 последнего выпуска", "P50 предыдущего выпуска"]
+    color = alt.Color("s:N", title=None, scale=alt.Scale(domain=names, range=[pal["p50"], pal["prev"]]),
+                      legend=alt.Legend(orient="top", direction="horizontal", labelLimit=260))
+    dash = alt.StrokeDash("s:N", title=None, legend=None, scale=alt.Scale(domain=names, range=[[1, 0], [4, 3]]))
+    layers = []
+    if window is not None:
+        layers.append(alt.Chart(pd.DataFrame({"t0": [window[0]], "t1": [window[1]]})).mark_rect(
+            opacity=0.12, color=pal["ramp"]).encode(x="t0:T", x2="t1:T"))
+    layers.append(alt.Chart(d).mark_area(opacity=pal["band_op"], color=pal["band"]).encode(
+        x=x, y=alt.Y("p10:Q", title=ytitle, scale=ydom), y2="p90:Q"))
+    long = d.melt(id_vars=["t"], value_vars=["p50", "prev"], var_name="s", value_name="v").dropna(subset=["v"])
+    long["s"] = long["s"].map({"p50": names[0], "prev": names[1]})
+    layers.append(alt.Chart(long).mark_line(strokeWidth=1.3).encode(
+        x=x, y=alt.Y("v:Q", scale=ydom, title=ytitle), color=color, strokeDash=dash))
+    hover = alt.selection_point(fields=["t"], nearest=True, on="mouseover", empty=False)
+    layers.append(alt.Chart(d).mark_rule(color=pal["rule"]).encode(
+        x=x, opacity=alt.condition(hover, alt.value(0.7), alt.value(0)),
+        tooltip=[alt.Tooltip("t:T", title="Время", format="%d.%m %H:%M"), alt.Tooltip("issue:N", title="Выпуск"),
+                 alt.Tooltip("lead:Q", title="Упреждение, ч"), alt.Tooltip("p10:Q", title="P10", format=".2f"),
+                 alt.Tooltip("p50:Q", title="P50", format=".2f"), alt.Tooltip("p90:Q", title="P90", format=".2f"),
+                 alt.Tooltip("prev:Q", title="P50 предыдущего", format=".2f"),
+                 alt.Tooltip("rev:Q", title="Ревизия", format="+.2f")]).add_params(hover))
+    power = alt.layer(*layers).properties(height=260)
+    thr = core.REVISION_MAE_THRESHOLD * k
+    r = d.dropna(subset=["rev"])
+    rev = alt.Chart(r).mark_rule(strokeWidth=1.4).encode(
+        x=x, y=alt.Y("rev:Q", title=f"Ревизия, {'МВт' if unit == 'mw' else 'доли ном.'}"), y2=alt.datum(0),
+        color=alt.condition(f"abs(datum.rev) > {thr}", alt.value(pal["ramp"]), alt.value(pal["prev"])),
+        tooltip=[alt.Tooltip("t:T", title="Время", format="%d.%m %H:%M"), alt.Tooltip("rev:Q", title="Ревизия", format="+.2f")]
+    ).properties(height=110)
+    return power, rev
+
+
+def tab_test_period(res: core.ForecastResult, unit: str) -> None:
+    stitched, summary = replay_data(core.replay_stamp())
+    if stitched is None or stitched.empty or summary is None or summary.empty:
+        st.markdown('<div class="wa-alert wa-alert-info">Результатов тестового периода нет: make replay</div>',
+                    unsafe_allow_html=True)
+        return
+    nurly = core.nurly_site()
+    cap = nurly.capacity_mw(core.FARM) if unit == "mw" else None
+    k, e_unit = (cap, "МВт·ч") if cap else (1.0, "ч.н.")
+    dec = summary["decision"].value_counts().to_dict()
+    n_rev = int(summary["flags"].fillna("").str.contains("revision").sum())
+    chips([("Выпусков", str(len(summary)), None),
+           ("Период", f"{stitched['time_local'].min():%d.%m} – {stitched['time_local'].max():%d.%m.%Y}", None),
+           ("Энергия парка", f"{num(stitched['p50'].sum() * k)} {e_unit}", None),
+           ("Решения", " · ".join(f"{x} {dec.get(x, 0)}" for x in ("accept", "flag", "recalculate")), None),
+           ("Существенных ревизий", str(n_rev), "warn" if n_rev else None)])
+    window = None
+    if not res.site.transfer and res.params.mode == core.MODE_REPLAY:
+        v = res.view(48)
+        window = (v["time_local"].min(), v["time_local"].max() + pd.Timedelta(hours=1))
+    power, rev = stitched_charts(stitched, k, unit, palette(), window)
+    st.altair_chart(power, **_stretch(st.altair_chart))
+    st.altair_chart(rev, **_stretch(st.altair_chart))
+
+    tbl = pd.DataFrame({
+        "Дата выпуска": pd.to_datetime(summary["issue_date"]).dt.date,
+        f"Энергия 48 ч, {e_unit}": summary["farm_energy_48h"].astype(float) * k,
+        f"D+1, {e_unit}": summary["farm_energy_day1"].astype(float) * k,
+        f"D+2, {e_unit}": summary["farm_energy_day2"].astype(float) * k,
+        "Ревизия MAE, доли ном.": pd.to_numeric(summary["revision_mae"], errors="coerce"),
+        "Флаги": summary["flags"].fillna("").astype(str).str.replace(";", ", "),
+        "Статус": summary["status"].astype(str),
+        "Решение": summary["decision"].astype(str),
+        "LLM": summary["llm_used"].astype(str).str.lower().eq("true"),
+    })
+    cc = st.column_config
+    cfg = {"Дата выпуска": cc.DateColumn(format="DD.MM.YYYY", width=105),
+           f"Энергия 48 ч, {e_unit}": cc.NumberColumn(format="%.1f", width=135),
+           f"D+1, {e_unit}": cc.NumberColumn(format="%.1f", width=100),
+           f"D+2, {e_unit}": cc.NumberColumn(format="%.1f", width=100),
+           "Ревизия MAE, доли ном.": cc.NumberColumn(format="%.3f", width=160),
+           "Флаги": cc.TextColumn(width="medium"), "Статус": cc.TextColumn(width=75),
+           "Решение": cc.TextColumn(width=100), "LLM": cc.CheckboxColumn(width=55)}
+    sel_kw = _kw(st.dataframe, on_select="rerun", selection_mode="single-row", key="replay_table", placeholder="—")
+    event = st.dataframe(tbl, hide_index=True, column_config=cfg, height=300, **sel_kw, **_stretch(st.dataframe))
+    dates = list(tbl["Дата выпуска"])
+    chosen = None
+    if sel_kw.get("on_select"):
+        try:
+            rows = list(event.selection.rows)
+        except Exception:  # noqa: BLE001
+            rows = []
+        chosen = dates[rows[0]] if rows else None
+    else:                                       # Streamlit без выбора строк — выбор списком
+        chosen = st.selectbox("Выпуск", dates, format_func=lambda x: f"{x:%d.%m.%Y}", key="replay_pick")
+    st.button(f"Открыть выпуск {chosen:%d.%m.%Y}" if chosen else "Открыть выпуск", key="open_issue",
+              disabled=chosen is None, on_click=open_issue, args=(chosen,))
 
 
 # ---------------------------------------------------------------- вкладки
@@ -447,11 +600,22 @@ def tab_tables(res: core.ForecastResult, view: pd.DataFrame, horizon: int, unit:
     scale = site.capacity_mw if unit == "mw" else None
     table = (core.daily_table(view, res.series, series_label, scale, "МВт·ч") if unit == "mw"
              else core.daily_table(view, res.series, series_label))
-    st.dataframe(table.rename(columns={"Сутки (местные)": "Сутки"}), hide_index=True, **_stretch(st.dataframe))
+    cc = st.column_config
+    table = table.rename(columns={"Сутки (местные)": "Сутки"})
+    st.dataframe(table, hide_index=True, **_stretch(st.dataframe),
+                 column_config={c: cc.TextColumn(width="small" if c == "Сутки" else "medium") for c in table.columns})
     with st.expander(f"Почасовой прогноз, {horizon} ч"):
-        st.dataframe(core.hourly_table(view, res.series, series_label, scale, "МВт" if unit == "mw" else "доля ном."),
-                     hide_index=True, height=420, **_stretch(st.dataframe))
-    stem = f"{site.key}_{res.issue_label}" + ("" if res.params.mode == core.MODE_LIVE else f"T{res.params.issue_hour:02d}")
+        hourly = core.hourly_table(view, res.series, series_label, scale, "МВт" if unit == "mw" else "доля ном.")
+        cfg = {"Местное время": cc.DatetimeColumn(**_kw(cc.DatetimeColumn, format="DD.MM HH:mm", width="small", pinned=True)),
+               "Упреждение, ч": cc.NumberColumn(format="%d", width="small")}
+        for c in hourly.columns:
+            if c in cfg:
+                continue
+            fmt = ("%.2f" if unit == "mw" else "%.3f") if " P" in f" {c}" and ("P10" in c or "P50" in c or "P90" in c) else \
+                ("%.0f" if "°" in c else "%.1f")
+            cfg[c] = cc.NumberColumn(format=fmt, width="small")
+        st.dataframe(hourly, hide_index=True, height=420, column_config=cfg, **_stretch(st.dataframe))
+    stem = file_stem(res)
     c1, c2, _ = st.columns([1, 1, 3])
     c1.download_button("Экспорт CSV", data=core.forecast_csv(view), file_name=f"forecast_{stem}_{horizon}h.csv",
                        mime="text/csv", help="Контракт FORECAST_COLUMNS", **_stretch(st.download_button))
@@ -481,7 +645,10 @@ def tab_agent(res: core.ForecastResult) -> None:
     st.markdown("**Трасса агента**")
     cc = st.column_config
     st.dataframe(core.trace_table(res.trace), hide_index=True, **_stretch(st.dataframe),
-                 column_config={"Шаг": cc.NumberColumn(width="small"), "Время, с": cc.NumberColumn(format="%.2f", width="small"),
+                 column_config={"Шаг": cc.NumberColumn(format="%d", width="small"),
+                                "Инструмент": cc.TextColumn(width="small"), "Кто вызвал": cc.TextColumn(width="small"),
+                                "Статус": cc.TextColumn(width="small"),
+                                "Время, с": cc.NumberColumn(format="%.2f", width="small"),
                                 "Итог": cc.TextColumn(width="large")})
     with st.expander("Отчёт агента"):
         if res.report_md:
@@ -490,23 +657,6 @@ def tab_agent(res: core.ForecastResult) -> None:
         with st.expander(f"Журнал ядра ({len(res.core_log)})"):
             for lvl, msg in res.core_log:
                 st.text(f"[{lvl}] {msg}")
-
-
-def tab_site(res: core.ForecastResult) -> None:
-    site = res.site
-    pts = pd.DataFrame([(series_label(k), la, lo) for k, la, lo in site.points], columns=["Турбина", "lat", "lon"])
-    c1, c2 = st.columns([3, 2])
-    with c1:
-        st.map(pts, latitude="lat", longitude="lon",
-               **_kw(st.map, zoom=13 if not site.transfer else 7, size=40 if not site.transfer else 3000,
-                     color="#8d96a3", height=320))
-    with c2:
-        rows = [("Название", site.name), ("Ключ", site.key), ("Турбин", str(site.n_turbines)),
-                ("Номинал турбины", f"{site.rated_mw:.1f} МВт" if site.rated_mw else "—"),
-                ("Мощность площадки", f"{site.n_turbines * site.rated_mw:.1f} МВт" if site.rated_mw else "—"),
-                ("История SCADA", "нет, перенос модели" if site.transfer else "есть, модель обучена")]
-        rows += [(f"{series_label(k)}, °", f"{la:.5f}, {lo:.5f}") for k, la, lo in site.points]
-        st.dataframe(pd.DataFrame(rows, columns=["Параметр", "Значение"]), hide_index=True, **_stretch(st.dataframe))
 
 
 def tab_fact(res: core.ForecastResult) -> None:
@@ -536,8 +686,17 @@ def tab_fact(res: core.ForecastResult) -> None:
     by["Горизонт"] = by["lead_day"].map({1: "1–24 ч", 2: "25–48 ч"})
     out = by[["Ряд", "Горизонт", "n_hours", "mae", "rmse", "bias", "coverage_p10_p90_pct", "mean_actual", "mean_p50"]].rename(
         columns={"n_hours": "Часов", "mae": "MAE, доли ном.", "rmse": "RMSE, доли ном.", "bias": "Смещение, доли ном.",
-                 "coverage_p10_p90_pct": "Покрытие P10–P90, %", "mean_actual": "Факт ср.", "mean_p50": "P50 ср."})
-    st.dataframe(out.round(3), hide_index=True, **_stretch(st.dataframe))
+                 "coverage_p10_p90_pct": "Покрытие P10–P90, %", "mean_actual": "Факт ср., доли ном.",
+                 "mean_p50": "P50 ср., доли ном."})
+    cc = st.column_config
+    st.dataframe(out, hide_index=True, **_stretch(st.dataframe),
+                 column_config={"Ряд": cc.TextColumn(width="small"), "Горизонт": cc.TextColumn(width="small"),
+                                "Часов": cc.NumberColumn(format="%d", width="small"),
+                                "MAE, доли ном.": cc.NumberColumn(format="%.3f"), "RMSE, доли ном.": cc.NumberColumn(format="%.3f"),
+                                "Смещение, доли ном.": cc.NumberColumn(format="%+.3f"),
+                                "Покрытие P10–P90, %": cc.NumberColumn(format="%.1f"),
+                                "Факт ср., доли ном.": cc.NumberColumn(format="%.3f"),
+                                "P50 ср., доли ном.": cc.NumberColumn(format="%.3f")})
     o = ev.get("overall") or {}
     if o:
         st.markdown(f'<div class="wa-tech">турбины: {o["n_hours"]} ч · MAE {o["mae"]:.3f} · RMSE {o["rmse"]:.3f} · '
@@ -588,48 +747,459 @@ def viz_html(issue_date: str, stamp: tuple) -> str | None:
     return htm
 
 
-def tab_3d(res: core.ForecastResult) -> None:
-    if res.site.custom_requested or res.site.transfer:
-        st.markdown('<div class="wa-banner">Сцена построена для ВЭС «Нурлы»</div>', unsafe_allow_html=True)
+TOP_H = 540                             # высота верхнего ряда: 3D-сцена слева, карта с формой справа
+MAP_H = 330
+NA = "недоступно в этой сборке"
+
+
+def nurly_scene_html(res: core.ForecastResult) -> str | None:
     stamp = tuple(int(f.stat().st_mtime) if f.exists() else 0 for f in (VIZ_DIR / "index.html", VIZ_DIR / "data" / "viz_data.js"))
     issue = res.params.issue_date.isoformat() if res.params.mode == core.MODE_REPLAY else str(res.issue_label)
-    htm = viz_html(issue, stamp)
-    if htm is None:
-        st.markdown('<div class="wa-alert wa-alert-info">Данных сцены нет: make viz</div>', unsafe_allow_html=True)
+    return viz_html(issue, stamp)
+
+
+def placeholder(text: str, height: int = TOP_H) -> None:
+    st.markdown(f'<div class="wa-ph" style="height:{height}px"><span>{esc(text)}</span></div>', unsafe_allow_html=True)
+
+
+def scene_block(res: core.ForecastResult | None, study: dict | None) -> None:
+    """3D-сцена текущей площадки: «Нурлы» — из viz/data/viz_data.js; своя площадка — vizdata после исследования."""
+    htm = None
+    if study is not None:
+        htm = study.get("viz_html")
+        if not htm:
+            err = study.get("errors", {}).get(core.STUDY_STEPS[3])
+            placeholder(f"3D-сцена площадки: {err}" if err else f"3D-сцена площадки: {NA}")
+            return
+    elif res is not None:
+        htm = nurly_scene_html(res)
+    if not htm:
+        placeholder("Данных 3D-сцены нет: make viz")
         return
     if components is not None and hasattr(components, "html"):
-        components.html(htm, height=760, scrolling=False)
+        components.html(htm, height=TOP_H, scrolling=False)
     elif hasattr(st, "iframe"):
-        st.iframe(htm, height=760)
+        st.iframe(htm, height=TOP_H)
+
+
+# ---------------------------------------------------------------- карта Казахстана и выбор площадки
+@st.cache_data(show_spinner=False, max_entries=2)
+def atlas_grid(stamp: tuple) -> dict | None:
+    return core.atlas_grid()
+
+
+@st.cache_data(show_spinner=False, max_entries=1)
+def fallback_centers() -> pd.DataFrame:
+    return core.fallback_centers()
+
+
+def atlas_stamp() -> tuple:
+    f = core.config.ROOT / "data" / "atlas" / "kz_wind_atlas.csv"
+    return (core.backend()["atlas"], int(f.stat().st_mtime) if f.exists() else 0)
+
+
+# Подложка без внешних тайлов: растровые тайлы CARTO требуют API-ключ, а строковый стиль без сети не загружается
+# и карта остаётся пустой. Фон + контур Казахстана + города-ориентиры работают офлайн.
+# sources не пустой: plotly выбрасывает пустой dict при сериализации, и MapLibre отвергает стиль без "sources".
+MAP_STYLE = {"version": 8, "sources": {"wa-empty": {"type": "geojson", "data": {"type": "Point", "coordinates": [0, 0]}}},
+             "layers": [{"id": "bg", "type": "background", "paint": {"background-color": "#11151c"}}]}
+CITIES = [("Астана", 51.17, 71.43), ("Алматы", 43.24, 76.89), ("Шымкент", 42.32, 69.59), ("Актобе", 50.28, 57.17),
+          ("Атырау", 47.11, 51.92), ("Актау", 43.65, 51.17), ("Караганда", 49.80, 73.10), ("Павлодар", 52.29, 76.97),
+          ("Усть-Каменогорск", 49.95, 82.61), ("Костанай", 53.21, 63.62), ("Уральск", 51.23, 51.37),
+          ("Кызылорда", 44.85, 65.51), ("Тараз", 42.90, 71.37), ("Талдыкорган", 45.02, 78.37), ("Жезказган", 47.78, 67.71),
+          ("Семей", 50.41, 80.25), ("Балхаш", 46.85, 74.98)]
+
+
+def cand_defaults(grid: dict | None) -> None:
+    """Кандидат по умолчанию — ячейка атласа с наибольшим ветром на 100 м."""
+    if "cand_lat" in st.session_state:
+        return
+    lat, lon = 47.0, 52.0
+    if grid is not None:
+        c = grid["cells"].dropna(subset=["ws100_est"])
+        if len(c):
+            best = c.loc[c["ws100_est"].idxmax()]
+            lat, lon = float(best["lat"]), float(best["lon"])
+    st.session_state.update(cand_lat=round(lat, 2), cand_lon=round(lon, 2), cand_n=10, cand_mw=2.5, cand_name="")
+
+
+def on_map_select() -> None:
+    """Клик по карте → координаты центра ячейки в форму (слой центров ячеек отдаёт lat/lon напрямую)."""
+    ev = st.session_state.get("kz_map")
+    try:
+        pts = list(ev["selection"]["points"]) if ev else []
+    except Exception:  # noqa: BLE001
+        pts = []
+    centers = st.session_state.get("_map_centers") or []
+    for p in pts:
+        lat, lon = p.get("lat"), p.get("lon")
+        if (lat is None or lon is None) and p.get("curve_number") == st.session_state.get("_map_cells_curve"):
+            i = p.get("point_index", p.get("point_number"))
+            if i is not None and 0 <= int(i) < len(centers):
+                lat, lon = centers[int(i)]
+        if lat is not None and lon is not None:
+            st.session_state["cand_lat"], st.session_state["cand_lon"] = round(float(lat), 2), round(float(lon), 2)
+            return
+
+
+def kz_figure(grid: dict | None, cand: tuple[float, float], study: dict | None):
+    fig = go.Figure()
+    if grid is not None:
+        c = grid["cells"]
+        fig.add_trace(go.Choroplethmap(
+            geojson=grid["geojson"], locations=c["id"], z=c["ws100_est"], featureidkey="id", colorscale="Turbo",
+            zmin=float(np.nanpercentile(c["ws100_est"], 2)), zmax=float(np.nanmax(c["ws100_est"])),
+            marker_opacity=0.62, marker_line_width=0, hoverinfo="skip",
+            colorbar=dict(title=dict(text="Ветер 100 м, м/с", side="right", font=dict(size=11)), thickness=10, len=0.85,
+                          x=0.995, xanchor="right", bgcolor="rgba(17,21,28,.6)", tickfont=dict(size=10))))
+        centers = c[["lat", "lon"]].to_numpy()
+        custom = np.column_stack([c["ws100_est"].round(2), c["ws50_ann"].round(2), c["resource_class"]])
+        hover = ("%{lat:.2f}° с. ш., %{lon:.2f}° в. д.<br>ветер 100 м %{customdata[0]} м/с · 50 м %{customdata[1]} м/с"
+                 "<br>ресурс: %{customdata[2]}<extra></extra>")
+    else:
+        fc = fallback_centers()
+        centers = fc[["lat", "lon"]].to_numpy()
+        custom, hover = None, "%{lat:.2f}° с. ш., %{lon:.2f}° в. д.<extra></extra>"
+    for ring in core.kz_outline():
+        xs, ys = zip(*ring)
+        fig.add_trace(go.Scattermap(lon=list(xs), lat=list(ys), mode="lines", line=dict(color="#cbd5e1", width=1.1),
+                                    hoverinfo="skip"))
+    fig.add_trace(go.Scattermap(lat=[c[1] for c in CITIES], lon=[c[2] for c in CITIES], text=[c[0] for c in CITIES],
+                                mode="markers", marker=dict(size=4, color="#9ca3af"), hovertemplate="%{text}<extra></extra>"))
+    st.session_state["_map_centers"] = [(float(a), float(b)) for a, b in centers]
+    st.session_state["_map_cells_curve"] = len(fig.data)
+    fig.add_trace(go.Scattermap(lat=centers[:, 0], lon=centers[:, 1], mode="markers", customdata=custom,
+                                marker=dict(size=15, opacity=0.02, color="#ffffff"), hovertemplate=hover, name="cells"))
+    n_lat, n_lon = map(float, np.mean([p[1:] for p in core.nurly_points()], axis=0))
+    fig.add_trace(go.Scattermap(lat=[n_lat], lon=[n_lon], mode="markers", marker=dict(size=11, color="#e5e7eb"),
+                                hovertemplate="ВЭС «Нурлы»<br>%{lat:.3f}°, %{lon:.3f}°<extra></extra>"))
+    if study is not None:
+        sp = study["params"]
+        fig.add_trace(go.Scattermap(lat=[sp.lat], lon=[sp.lon], mode="markers", marker=dict(size=12, color="#22c55e"),
+                                    hovertemplate=f"{esc(sp.label)}<br>исследована<extra></extra>"))
+    fig.add_trace(go.Scattermap(lat=[cand[0]], lon=[cand[1]], mode="markers",
+                                marker=dict(size=13, color="#f59e0b"),
+                                hovertemplate="Кандидат<br>%{lat:.2f}°, %{lon:.2f}°<extra></extra>"))
+    fig.update_layout(map=dict(style=MAP_STYLE, center=dict(lat=48.0, lon=67.2), zoom=2.55),
+                      height=MAP_H, margin=dict(l=0, r=0, t=0, b=0), showlegend=False, clickmode="event+select",
+                      paper_bgcolor="rgba(0,0,0,0)", dragmode="pan", uirevision="kz_map",
+                      hoverlabel=dict(bgcolor="#1f2937", font=dict(color="#f9fafb", size=12)))
+    return fig
+
+
+def request_study() -> None:
+    st.session_state["_study_req"] = core.StudyParams(
+        lat=float(st.session_state["cand_lat"]), lon=float(st.session_state["cand_lon"]),
+        n_turbines=int(st.session_state["cand_n"]), rated_mw=float(st.session_state["cand_mw"]),
+        name=str(st.session_state.get("cand_name") or ""))
+
+
+def back_to_nurly() -> None:
+    st.session_state["active_study"] = None
+
+
+def map_block(study: dict | None) -> None:
+    grid = atlas_grid(atlas_stamp())
+    cand_defaults(grid)
+    cand = (float(st.session_state["cand_lat"]), float(st.session_state["cand_lon"]))
+    if go is not None:
+        fig = kz_figure(grid, cand, study)
+        cfg = {"displayModeBar": False, "scrollZoom": True}
+        kw = _kw(st.plotly_chart, on_select=on_map_select, selection_mode="points", key="kz_map", config=cfg)
+        st.plotly_chart(fig, **kw, **_stretch(st.plotly_chart))
+    else:
+        placeholder(f"Карта Казахстана: plotly {NA}", MAP_H)
+    cell = core.nearest_cell(*cand)
+    inside = core.in_kz(*cand)
+    if not inside:
+        line = "точка вне Казахстана"
+    elif cell:
+        line = (f"ячейка атласа {cell.get('lat', 0):.2f}°, {cell.get('lon', 0):.2f}° · ветер 100 м "
+                f"{cell.get('ws100_est', float('nan')):.1f} м/с · ресурс {cell.get('resource_class', '—')} · "
+                f"{cell.get('elevation_m', float('nan')):.0f} м")
+    else:
+        line = f"атлас ветра: {NA}"
+    st.markdown(f'<div class="wa-tech" style="margin:.1rem 0 .3rem">{esc(line)}</div>', unsafe_allow_html=True)
+    c = st.columns(4)
+    c[0].number_input("Широта, °", min_value=core.KZ_LAT[0], max_value=core.KZ_LAT[1], step=0.01, format="%.2f",
+                      key="cand_lat")
+    c[1].number_input("Долгота, °", min_value=core.KZ_LON[0], max_value=core.KZ_LON[1], step=0.01, format="%.2f",
+                      key="cand_lon")
+    c[2].number_input("Турбин", min_value=1, max_value=200, step=1, key="cand_n")
+    c[3].number_input("МВт", min_value=0.5, max_value=10.0, step=0.1, format="%.1f", key="cand_mw")
+    st.text_input("Название", key="cand_name", placeholder="Название площадки",
+                  **_kw(st.text_input, label_visibility="collapsed"))
+    c = st.columns([1.25, 1])
+    c[0].button("Исследовать площадку", type="primary", on_click=request_study, disabled=not inside,
+                key="study_go", **_stretch(st.button))
+    c[1].button("Вернуться к «Нурлы»", on_click=back_to_nurly, disabled=study is None, key="study_back",
+                **_stretch(st.button))
+
+
+# ---------------------------------------------------------------- исследование площадки
+def run_study(req: core.StudyParams) -> None:
+    """Долгий расчёт с ходом по шагам (st.status); результат — в session_state["studies"][ключ]."""
+    studies = st.session_state.setdefault("studies", {})
+    key = req.key()
+    if key in studies and not studies[key].get("errors"):
+        st.session_state["active_study"] = key
+        return
+    icons = {"run": "…", "done": "✓", "skip": "—", "error": "✕"}
+    with st.status(f"Исследование: {req.label}", expanded=True) as box:
+        lines = {}
+        slot = st.empty()
+
+        def progress(i, label, state):
+            suffix = {"skip": f" · {NA}", "error": " · ошибка"}.get(state, "")
+            lines[i] = f"{icons.get(state, '')} {i + 1}. {label if state == 'run' else core.STUDY_STEPS[i]}{suffix}"
+            slot.markdown("  \n".join(lines[k] for k in sorted(lines)))
+        try:
+            with st.spinner("Загрузка модели"):
+                core_resources()
+            out = core.run_assessment(req, wx=weather_client(), progress=progress)
+        except Exception as e:  # noqa: BLE001
+            box.update(label=f"Исследование не выполнено: {friendly_error(e)}", state="error", expanded=False)
+            return
+        bad = bool(out["errors"])
+        box.update(label=f"Исследование: {req.label} · {out.get('elapsed_s', 0):.0f} с"
+                         + (" · с ошибками" if bad else ""), state="error" if bad and not out.get("forecast_result")
+                   else "complete", expanded=False)
+    studies[key] = out
+    st.session_state["active_study"] = key
+
+
+def _f(x, nd=1, pct=False) -> str:
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return "—"
+    if not np.isfinite(v):
+        return "—"
+    if pct:
+        v = v * 100 if v <= 1.5 else v
+        return f"{v:.{nd}f} %"
+    return num(v, nd)
+
+
+def _rose_frame(rose: list[dict]) -> pd.DataFrame:
+    """Роза ветров: сектор → угол центра (°, от севера по часовой)."""
+    df = pd.DataFrame(rose)
+    n = len(df)
+    if n == 0:
+        return df
+    sec = df.get("sector")
+    ang = None
+    if sec is not None:
+        if pd.api.types.is_numeric_dtype(sec):
+            v = sec.astype(float)
+            ang = v * (360.0 / n) if v.max() < n else v
+        elif set(map(str, sec)) <= set(core.COMPASS_RU):
+            ang = sec.map(lambda s: core.COMPASS_RU.index(str(s)) * 22.5)
+    if "deg" in df and pd.api.types.is_numeric_dtype(df["deg"]):
+        ang = df["deg"]
+    df["ang"] = ang.astype(float) if ang is not None else np.arange(n) * 360.0 / n
+    df["name"] = df["ang"].map(core.compass) if sec is None or pd.api.types.is_numeric_dtype(sec) else sec.astype(str)
+    share = df.get("share", pd.Series(np.zeros(n))).astype(float)
+    df["share_pct"] = share * 100 if share.max() <= 1.0 else share
+    return df
+
+
+def rose_chart(rose: list[dict], pal: dict) -> alt.Chart | None:
+    df = _rose_frame(rose)
+    if df.empty:
+        return None
+    n, R = len(df), 120.0
+    half = np.pi / n
+    df["t0"], df["t1"] = np.deg2rad(df["ang"]) - half, np.deg2rad(df["ang"]) + half
+    df["r"] = np.sqrt(df["share_pct"] / max(df["share_pct"].max(), 1e-9)) * R
+    ws = df["ws_mean"].astype(float) if "ws_mean" in df else pd.Series(np.nan, index=df.index)
+    df["ws"] = ws
+    rings = pd.DataFrame({"r": [R * 0.5, R], "t0": 0.0, "t1": 2 * np.pi})
+    base = alt.Chart(rings).mark_arc(filled=False, stroke=pal["rule"], strokeOpacity=0.4).encode(
+        theta=alt.Theta("t0:Q", scale=None), theta2="t1:Q", radius=alt.Radius("r:Q", scale=None), radius2=alt.datum(0))
+    arcs = alt.Chart(df).mark_arc(stroke="#11151c", strokeWidth=0.6).encode(
+        theta=alt.Theta("t0:Q", scale=None), theta2="t1:Q", radius=alt.Radius("r:Q", scale=None), radius2=alt.datum(0),
+        color=alt.Color("ws:Q", title="м/с", scale=alt.Scale(scheme="turbo"), legend=alt.Legend(orient="right", gradientLength=90)),
+        tooltip=[alt.Tooltip("name:N", title="Румб"), alt.Tooltip("share_pct:Q", title="Доля часов, %", format=".1f"),
+                 alt.Tooltip("ws:Q", title="Ветер 100 м, м/с", format=".1f")])
+    c0 = R + 16                                  # центр дуг — середина фиксированного холста
+    lab = pd.DataFrame({"txt": ["С", "В", "Ю", "З"], "a": [0, 90, 180, 270]})
+    lab["x"], lab["y"] = c0 + np.sin(np.deg2rad(lab["a"])) * (R + 9), c0 - np.cos(np.deg2rad(lab["a"])) * (R + 9)
+    text = alt.Chart(lab).mark_text(fontSize=11, color=pal["text"]).encode(
+        x=alt.X("x:Q", scale=None, axis=None), y=alt.Y("y:Q", scale=None, axis=None), text="txt:N")
+    return alt.layer(base, arcs, text).properties(height=2 * c0, width=2 * c0, title="Роза ветров, 100 м")
+
+
+def demote_headings(md: str, by: int = 2) -> str:
+    """Заголовки отчёта на два уровня ниже: внутри панели «#» не должен спорить с заголовком страницы."""
+    import re
+    return re.sub(r"^(#{1,6})(\s)", lambda m: "#" * min(6, len(m.group(1)) + by) + m.group(2), md, flags=re.M)
+
+
+def study_section(study: dict) -> None:
+    p, a, res = study["params"], study.get("assessment"), study.get("forecast_result")
+    pal = palette()
+    st.subheader(f"Исследование площадки · {p.label}")
+    items = [("Координаты", f"{p.lat:.3f}° с. ш., {p.lon:.3f}° в. д.", None),
+             ("Проект", f"{p.n_turbines} × {p.rated_mw:.1f} МВт = {p.n_turbines * p.rated_mw:.1f} МВт", None)]
+    cell = study.get("cell")
+    if cell:
+        items.append(("Атлас", f"{_f(cell.get('ws100_est'))} м/с · {cell.get('resource_class', '—')}", None))
+    if a:
+        per = a.get("period") or {}
+        items.append(("ERA5", f"{per.get('start', '—')} – {per.get('end', '—')} · {per.get('hours', '—')} ч", None))
+        if a.get("elevation_m") is not None:
+            items.append(("Высота", f"{_f(a.get('elevation_m'), 0)} м", None))
+    items.append(("Расчёт", f"{study.get('elapsed_s', 0):.0f} с", "warn" if study.get("errors") else None))
+    chips(items)
+    notes = [("warning", f"{k}: {v}") for k, v in study.get("errors", {}).items()]
+    notes += [("info", f"{k}: {NA}") for k in study.get("skipped", [])]
+    if a:
+        notes += [("warning", str(w)) for w in (a.get("warnings") or [])]
+    if notes:
+        st.markdown('<div class="wa-alerts">' + "".join(
+            f'<div class="wa-alert wa-alert-{lvl}">{esc(t)}</div>' for lvl, t in notes) + "</div>", unsafe_allow_html=True)
+
+    if a:
+        ws, wb, bm = a.get("ws100") or {}, a.get("weibull") or {}, a.get("benchmark") or {}
+        c = st.columns(5)
+        metric(c[0], "Средний ветер 100 м, м/с", _f(ws.get("mean")),
+               f"медиана {_f(ws.get('median'))} · P90 {_f(ws.get('p90'))} · макс. {_f(ws.get('max'))}")
+        metric(c[1], "Вейбулл k / c", f"{_f(wb.get('k'), 2)} / {_f(wb.get('c'))}",
+               f"штиль {_f(a.get('calm_share'), 0, True)} · шторм {_f(a.get('storm_share'), 1, True)}")
+        flh = a.get("full_load_hours")
+        metric(c[2], "КИУМ", _f(a.get("cf"), 1, True),
+               " · ".join(x for x in (f"{flh} ч полной нагрузки" if flh else "",
+                                      f"плотность ×{_f(a.get('density_ratio'), 3)}" if a.get("density_ratio") else "") if x)
+               or None)
+        cal = ((a.get("scenarios") or {}).get("nurly_calibrated") or {}).get("aep_gwh")
+        metric(c[3], f"Годовая выработка {p.n_turbines}×{p.rated_mw:.1f} МВт, ГВт·ч", _f(a.get("aep_gwh"), 1),
+               f"на турбину {_f(a.get('aep_per_turbine_gwh'), 2)}" + (f" · по кривой «Нурлы» {_f(cal, 1)}" if cal else ""))
+        ratio = bm.get("ratio_to_nurly")
+        metric(c[4], "Ветер к ВЭС «Нурлы»", f"×{_f(ratio, 2)}" if ratio is not None else "—",
+               f"«Нурлы»: ветер {_f(bm.get('nurly_ws100_mean'))} м/с · КИУМ факт {_f(bm.get('nurly_cf_actual'), 1, True)}",
+               warn=ratio is not None and float(ratio) < 1)
+        c1, c2, c3 = st.columns([2.2, 1.4, 1.6])
+        m = pd.DataFrame(a.get("monthly") or [])
+        if not m.empty and "ws100_mean" in m:
+            m["name"] = m.get("name_ru", m.get("month", pd.Series(range(1, len(m) + 1))).astype(str))
+            m["cf_pct"] = m["cf"].astype(float) * (100 if m["cf"].astype(float).max() <= 1.5 else 1) if "cf" in m else np.nan
+            order = list(m["name"])
+            x = alt.X("name:N", sort=order, title=None, axis=alt.Axis(labelAngle=0))
+            bars = alt.Chart(m).mark_bar(color=pal["band"], opacity=0.9).encode(
+                x=x, y=alt.Y("ws100_mean:Q", title="Ветер 100 м, м/с"),
+                tooltip=[alt.Tooltip("name:N", title="Месяц"), alt.Tooltip("ws100_mean:Q", title="Ветер, м/с", format=".1f"),
+                         alt.Tooltip("cf_pct:Q", title="КИУМ, %", format=".1f")])
+            line = alt.Chart(m).mark_line(point=True, color=pal["ramp"], strokeWidth=1.8).encode(
+                x=x, y=alt.Y("cf_pct:Q", title="КИУМ, %", axis=alt.Axis(orient="right", grid=False)))
+            c1.altair_chart(alt.layer(bars, line).resolve_scale(y="independent").properties(
+                height=250, title="Месячный ход: ветер (столбцы) и КИУМ (линия)"), **_stretch(st.altair_chart))
+        rc = rose_chart(a.get("rose") or [], pal)
+        if rc is not None:
+            c2.altair_chart(rc, **_kw(st.altair_chart, width="content", use_container_width=False))
+            if a.get("prevailing_sector") is not None:
+                c2.markdown(f'<div class="wa-tech">преобладающий румб: {esc(a["prevailing_sector"])}</div>',
+                            unsafe_allow_html=True)
+        dd = pd.DataFrame(a.get("diurnal") or [])
+        if not dd.empty and {"hour_local", "ws100_mean"} <= set(dd.columns):
+            c3.altair_chart(alt.Chart(dd).mark_line(point=True, color=pal["p50"], strokeWidth=1.6).encode(
+                x=alt.X("hour_local:Q", title="Час, UTC+5", scale=alt.Scale(domain=[0, 23]), axis=alt.Axis(tickCount=8)),
+                y=alt.Y("ws100_mean:Q", title="Ветер 100 м, м/с", scale=alt.Scale(zero=False)),
+                tooltip=[alt.Tooltip("hour_local:Q", title="Час"), alt.Tooltip("ws100_mean:Q", title="м/с", format=".1f")]
+            ).properties(height=250, title="Суточный ход ветра"), **_stretch(st.altair_chart))
+        src = [str(s) for s in (a.get("data_sources") or [])]
+        if a.get("power_curve_source"):
+            src.append(f"кривая мощности: {a['power_curve_source']}")
+        if src:
+            st.markdown(f'<div class="wa-tech">{esc(" · ".join(src))}</div>', unsafe_allow_html=True)
+
+    if res is not None:
+        v = res.view(48)
+        sel = main_series(res)
+        s = core.series_stats(v, sel)
+        cap = res.site.capacity_mw(sel) or (p.n_turbines * p.rated_mw)
+        chips([("LIVE", f"выпуск {res.issue_label}", None), ("Энергия 48 ч", f"{num(s['energy'] * cap)} МВт·ч "
+               f"[{num(s['energy_p10'] * cap)}–{num(s['energy_p90'] * cap)}]", None),
+               ("Пик P50", f"{s['max_p50'] * cap:.1f} МВт", None), ("Средняя загрузка", f"{100 * s['mean_p50']:.0f} %", None),
+               ("Ветер 100 м", f"{s['wind_mean']:.1f} м/с", None), ("Уверенность", core.confidence_word(s["band"]), None)])
+        main_chart(res, v, "Прогноз 48 ч · теоретическая выработка площадки (перенос модели «Нурлы»)", key="study")
+
+    rep = study.get("report")
+    if rep and rep.get("markdown"):
+        c1, c2 = st.columns([5, 1], **_kw(st.columns, vertical_alignment="bottom"))
+        c1.markdown("**Отчёт для руководства**")
+        stem = f"site_{p.lat:.2f}_{p.lon:.2f}_{p.n_turbines}x{p.rated_mw:.1f}".replace(".", "p")
+        c2.download_button("Скачать .md", data=str(rep["markdown"]).encode("utf-8"), file_name=f"report_{stem}.md",
+                           mime="text/markdown", key="dl_study_md", **_stretch(st.download_button))
+        fc = rep.get("fact_check") or {}
+        tech = ["LLM " + core.llm_model_name() if rep.get("llm_used") else "LLM не использовалась — шаблон по данным"]
+        if fc:
+            tech.append(f"сверка чисел: проверено {fc.get('checked', '—')}, не подтверждено {len(fc.get('unverified') or [])}")
+        st.markdown(f'<div class="wa-tech">{esc(" · ".join(tech))}</div>', unsafe_allow_html=True)
+        with st.container(border=True, **_kw(st.container, height=520)):
+            st.markdown(demote_headings(str(rep["markdown"])))
+    elif core.STUDY_STEPS[4] in study.get("skipped", []):
+        pass
 
 
 # ---------------------------------------------------------------- страница
 def show_error(err) -> None:
     st.error(err[0])
-    with st.expander("Подробности"):
-        st.code(err[1])
+
+
+def page_header(res: core.ForecastResult | None, study: dict | None) -> None:
+    name = study["params"].label if study else "ВЭС «Нурлы»"
+    st.title(f"WindAgent · {name}")
+    be = core.backend()
+    missing = [n for n, ok in (("атлас", be["atlas"]), ("оценка", be["assess"]), ("3D", be["vizdata"])) if not ok]
+    core_txt = (str(res.forecast["model_version"].iloc[0]) if res is not None else "—") + \
+        (f" · нет: {', '.join(missing)}" if missing else " · атлас, оценка, 3D")
+    if study:
+        sp = study["params"]
+        items = [("Площадка", f"{sp.n_turbines} × {sp.rated_mw:.1f} МВт · перенос модели", "warn"),
+                 ("Режим", "исследование · LIVE", None)]
+    else:
+        items = [("Площадка", "ВЭС «Нурлы» · 2 турбины, SCADA", None)]
+    items.append(("Ядро", core_txt, "warn" if missing else None))
+    chips(items)
 
 
 def main() -> None:
     params, run = sidebar()
+    run = run or bool(st.session_state.pop("_run_now", False))
     if run or ("result" not in st.session_state and "error" not in st.session_state and not params.use_llm):
-        run_and_store(params)          # первый заход — сразу расчёт по параметрам по умолчанию (из кэша, < 1 с)
+        run_and_store(params)          # первый заход — сразу расчёт «Нурлы» по параметрам по умолчанию (из кэша, < 1 с)
 
     res: core.ForecastResult | None = st.session_state.get("result")
-    st.title(f"WindAgent · {title_for(params, res)}")
-    custom_banner = params.site == core.CUSTOM_KEY or (res is not None and res.site.custom_requested)
+    req = st.session_state.pop("_study_req", None)
+    studies = st.session_state.setdefault("studies", {})
+    study = studies.get(st.session_state.get("active_study")) if st.session_state.get("active_study") else None
+    page_header(res, study)
+    left, right = st.columns([3, 2], gap="medium")
+    with left:
+        scene_block(res, study)
+    with right:
+        map_block(study)
+    if req is not None:
+        # Ход исследования — под сценой и картой (они остаются на экране); готовый результат — перезапуском:
+        # шапка и 3D-сцена сверху уже новой площадки. Если исследование упало целиком — статус с ошибкой остаётся.
+        run_study(req)
+        if st.session_state.get("active_study") == req.key():
+            st.rerun()
+
     err = st.session_state.get("error")
     if res is None:
-        if custom_banner:
-            st.markdown(f'<div class="wa-banner">{esc(core.TRANSFER_WARNING)}</div>', unsafe_allow_html=True)
         if err:
             show_error(err)
+        if study:
+            study_section(study)
         return
 
     view = res.view(params.horizon)
+    if study:                                  # исследованная площадка — сразу под сценой и картой
+        study_section(study)
+    st.markdown("#### ВЭС «Нурлы» · прогноз выработки")
     header(res, view, params.horizon, stale=res.params.run_key() != params.run_key())
-    if custom_banner:
-        st.markdown(f'<div class="wa-banner">{esc(core.TRANSFER_WARNING)}</div>', unsafe_allow_html=True)
     if err:
         show_error(err)
     toast = st.session_state.pop("toast", None)
@@ -637,23 +1207,23 @@ def main() -> None:
         _toast(toast)
 
     kpis(res, view, params.horizon)
-    unit = main_chart(res, view)
+    unit = main_chart(res, view, f"Парк · P10–P90, {params.horizon} ч")
+    why_block(res, view)
 
-    rows = core.alert_rows(res, view, custom_banner)
+    rows = core.alert_rows(res, view, False)
     n_att = sum(r["level"] in ("warning", "error") for r in rows)
-    tabs = st.tabs([f"Предупреждения ({n_att})", "Таблицы и выгрузка", "Агент", "Площадка", "Факт и точность", "3D-сцена"])
+    # key + on_change="rerun": активная вкладка хранится в session_state и не сбрасывается при перезапусках
+    tabs = st.tabs([f"Предупреждения ({n_att})", "Тестовый период", "Таблицы и выгрузка", "Агент", "Факт и точность"],
+                   **_kw(st.tabs, key="main_tabs", on_change="rerun"))
     with tabs[0]:
         tab_alerts(rows)
     with tabs[1]:
-        tab_tables(res, view, params.horizon, unit)
+        tab_test_period(res, unit)
     with tabs[2]:
-        tab_agent(res)
+        tab_tables(res, view, params.horizon, unit)
     with tabs[3]:
-        tab_site(res)
+        tab_agent(res)
     with tabs[4]:
         tab_fact(res)
-    with tabs[5]:
-        tab_3d(res)
-
 
 main()

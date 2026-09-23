@@ -23,6 +23,7 @@ openai==3.19.0
 packaging==26.3
 pandas==3.0.6
 pillow==12.3.0
+plotly==7.1.0
 pluggy==1.6.0
 pydantic==2.13.5
 pydantic-core==2.46.5

@@ -82,7 +82,7 @@
 </head>
 <body>
 <header>
-  <h1>ВЭС · поле ветра над рельефом</h1>
+  <h1 id="siteTitle">ВЭС · поле ветра над рельефом</h1>
   <div class="disclaimer">Визуализация прогнозного поля ветра Open-Meteo над рельефом ВЭС. <b>Не является CFD-симуляцией.</b></div>
   <span id="srcBadge" class="badge">данные…</span>
 </header>
@@ -92,7 +92,6 @@
       <div class="now" id="hudTime">—</div>
       <div id="hudWind">—</div>
     </div>
-    <div class="hud tr small" id="hudHint">Мышь: вращение · колесо: масштаб · правая кнопка: сдвиг<br>Пробел — пуск/пауза, ← → — час</div>
     <div class="hud bl">
       <div class="small">Цвет частиц — температура 2 м, °C (поправка на высоту рельефа −6,5 °C/км)</div>
       <div class="tbar" id="tbar"><div class="mk" id="tmark"></div></div>
@@ -138,7 +137,7 @@
           <div class="v"><svg class="arrow" id="vArrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 L18 20 L12 16 L6 20 Z" fill="#5eead4"/></svg> <span id="vDir">—</span></div>
           <div class="s" id="vDirS">—</div></div>
         <div class="stat"><div class="k">Температура 2 м</div><div class="v" id="vT">—</div><div class="s">прогноз Open-Meteo</div></div>
-        <div class="stat"><div class="k">T1 / T2, P50</div><div class="v" id="vT12">—</div><div class="s">% от номинала</div></div>
+        <div class="stat"><div class="k" id="kT12">T1 / T2, P50</div><div class="v" id="vT12">—</div><div class="s">% от номинала</div></div>
         <div class="stat power"><div><div class="k">Мощность парка P50</div><div class="v" id="vP50">—</div></div>
           <div class="s">P10–P90<br><span id="vBand" style="color:var(--text);font-size:15px">—</span><br>% от номинала</div></div>
       </div>
@@ -154,7 +153,7 @@
         <span><i style="background:var(--amber)"></i>текущий час</span>
       </div>
     </section>
-    <section class="card">
+    <section class="card" id="roseCard">
       <div class="row" style="justify-content:space-between;margin-bottom:6px">
         <h2 style="margin:0">Роза ветров, 100 м</h2>
         <div class="seg" role="group" aria-label="Период розы ветров">
@@ -176,7 +175,7 @@
       частицы держатся ~100 м над рельефом (с тем же вертикальным масштабом), движение ускорено ×120, лёгкий визуальный шум
       добавлен для читаемости. Обтекание рельефа, турбулентность и аэродинамические следы турбин <b>не моделируются</b>.
       Турбины показаны увеличенными; позиции турбин парка, застройка и лес — из OpenStreetMap (роторы парка вращаются со скоростью ∝ P50 парка).
-      Рельеф: <span id="demSrc"></span>. Слои: <span id="osmSrc"></span>.
+      Рельеф: <span id="demSrc"></span>. Слои: <span id="osmSrc"></span>.<span id="layoutNote"></span>
     </footer>
   </aside>
 </main>
@@ -200,6 +199,15 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 const D = window.VIZ_DATA;
 if (!D) throw new Error('VIZ_DATA отсутствует');
 window.__vizStarted = true;
+if (!Array.isArray(D.forecasts) || !D.forecasts.some(f => f.hours && f.hours.length)) {
+  window.__showErr('Нет выпуска прогноза для сцены.');
+  throw new Error('VIZ_DATA.forecasts пуст');
+}
+D.forecasts = D.forecasts.filter(f => f.hours && f.hours.length);
+D.turbines = Array.isArray(D.turbines) ? D.turbines : [];
+if (D.site_name) { document.getElementById('siteTitle').textContent = `${D.site_name} · поле ветра над рельефом`; document.title = `${D.site_name}: поле ветра 3D`; }
+const TNAMES = D.turbines.map(t => t.name || String(t.id).toUpperCase());
+const TLABEL = TNAMES.length <= 3 ? TNAMES.join('/') : `${TNAMES[0]}…${TNAMES.at(-1)}`;
 
 // ---------------------------------------------------------------- константы и утилиты
 const DEG = Math.PI / 180;
@@ -226,6 +234,7 @@ function groundAt(x, yN) {       // билинейная интерполяци�
 
 // температурная шкала синий → белый → красный (0 °C — белый)
 const allT = D.forecasts.flatMap(f => f.hours.map(h => h.temperature_2m)).filter(v => v != null);
+if (!allT.length) allT.push(0);
 const T_LO = Math.min(-20, Math.floor(Math.min(...allT) / 5) * 5), T_HI = Math.max(20, Math.ceil(Math.max(...allT) / 5) * 5);
 const T_STOPS = [[0, [49, 54, 149]], [0.25, [69, 117, 180]], [0.5, [235, 240, 245]], [0.75, [244, 109, 67]], [1, [180, 20, 38]]];
 function tempNorm(t) { return t < 0 ? 0.5 * (1 - clamp(t / T_LO, 0, 1)) : 0.5 + 0.5 * clamp(t / T_HI, 0, 1); }
@@ -383,9 +392,10 @@ function makeTurbine(mat, rotorR) {
 const matOurs = new THREE.MeshStandardMaterial({ color: '#f4f7fa', roughness: 0.45, metalness: 0.1, emissive: '#0d3b36', emissiveIntensity: 0.4 });
 const matPark = new THREE.MeshStandardMaterial({ color: '#7d8894', roughness: 0.75, metalness: 0.05 });
 const rotorOf = m => (m && /GW109/.test(m)) ? 54.5 : 50;          // GW109: ротор 109 м
-const turbines = D.turbines.map(tb => {
+const turbines = D.turbines.map((tb, n) => {
   const t = makeTurbine(matOurs, rotorOf(tb.model));
   const label = textSprite(tb.name, '#5eead4', 46, ''); t.grp.add(label);
+  label.visible = D.turbines.length <= 4 || n === 0 || n === D.turbines.length - 1;   // длинный ряд: подписи только по краям
   label.scale.set(0.07, 0.035);
   label.center.set(tb.x_m < 0 ? 0.62 : 0.38, 0.1);   // T1 (запад) чуть влево, T2 (восток) чуть вправо — не слипаются издалека
   const ring = new THREE.Mesh(new THREE.RingGeometry(40, 54, 48), new THREE.MeshBasicMaterial({ color: '#5eead4', transparent: true, opacity: 0.9, side: THREE.DoubleSide, depthWrite: false }));
@@ -477,7 +487,7 @@ ptGeo.setAttribute('color', new THREE.BufferAttribute(ptCol, 3).setUsage(THREE.D
 const points = new THREE.Points(ptGeo, new THREE.PointsMaterial({ size: 3.2, sizeAttenuation: false, map: dot, vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
 points.frustumCulled = false; scene.add(points);
 
-const siteGround = D.turbines.reduce((s, t) => s + t.ground_m, 0) / D.turbines.length;
+const siteGround = D.turbines.length ? D.turbines.reduce((s, t) => s + t.ground_m, 0) / D.turbines.length : T.mean_m;
 let simT = 0;
 function stepParticles(dt, w) {
   const n = state.count, h = T.half_size_m, ex = state.exag;
@@ -516,8 +526,10 @@ const hoursOf = () => issues[state.issue].hours;
 function weatherAt(t) {              // непрерывное время → интерполяция между часами
   const H = hoursOf(), i = clamp(Math.floor(t), 0, H.length - 1), j = Math.min(i + 1, H.length - 1), f = clamp(t - i, 0, 1);
   const a = H[i], b = H[j], v = (k) => lerp(a[k] ?? 0, b[k] ?? a[k] ?? 0, f);
-  return { ws: v('wind_speed_100m'), wd: lerpAngle(a.wind_direction_100m ?? 0, b.wind_direction_100m ?? a.wind_direction_100m ?? 0, f), t2m: v('temperature_2m'),
-    p50: v('p50'), p50_t1: v('p50_t1'), p50_t2: v('p50_t2') };
+  const w = { ws: v('wind_speed_100m'), wd: lerpAngle(a.wind_direction_100m ?? 0, b.wind_direction_100m ?? a.wind_direction_100m ?? 0, f), t2m: v('temperature_2m'),
+    p50: v('p50') };
+  D.turbines.forEach(tb => { const k = 'p50_' + tb.id; w[k] = a[k] != null ? v(k) : null; });   // нет своего ряда → P50 парка
+  return w;
 }
 
 // ---------------------------------------------------------------- панель
@@ -533,17 +545,24 @@ const want = issues.findIndex(f => f.issue_date === window.VIZ_DEFAULT_ISSUE);  
 const pref = want >= 0 ? want : issues.findIndex(f => f.issue_date === '2026-02-10');
 state.issue = pref >= 0 ? pref : issues.length - 1; sel.value = state.issue;
 const isSample = D.forecast_source === 'sample';
-$('srcBadge').textContent = isSample ? 'ОБРАЗЕЦ прогноза (модель + архив Open-Meteo)' : `прогнозы: outputs/forecasts · ${issues.length} выпусков`;
+$('srcBadge').textContent = isSample ? 'ОБРАЗЕЦ прогноза (модель + архив Open-Meteo)'
+  : D.forecast_source === 'panel' ? (issues.length > 1 ? `прогноз панели · ${issues.length} выпусков` : 'прогноз панели')
+  : `прогнозы: outputs/forecasts · ${issues.length} выпусков`;
+$('scaleNote').textContent = `квадрат ${+(2 * T.half_size_m / 1000).toFixed(1)} × ${+(2 * T.half_size_m / 1000).toFixed(1)} км`;
+$('kT12').textContent = `${TLABEL}, P50`;
+if (D.site_key && D.site_key !== 'nurly') $('layoutNote').textContent = D.turbines.length > 1
+  ? ` Расстановка турбин условная: ${D.turbines.length} шт. рядами поперёк преобладающего ветра, шаг 500 м.`
+  : ' Расположение турбины условное: центр площадки.';
 if (isSample) $('srcBadge').classList.add('sample');
 (function mapLegend() {
   const it = [];
   const m = D.turbines[0]?.model;
-  it.push(`<span><i class="dot" style="background:#5eead4"></i>T1/T2 — наши${m ? ' (' + m + ')' : ''}</span>`);
+  it.push(`<span><i class="dot" style="background:#5eead4"></i>${TLABEL} — ${D.site_key && D.site_key !== 'nurly' ? 'проектные' : 'наши'}${m ? ' (' + m + ')' : ''}</span>`);
   if (OSM.available) {
     it.push(parkTurbines.length ? `<span><i class="dot" style="background:#7d8894"></i>турбины парка (OSM): ${parkTurbines.length}</span>` : '<span>турбин парка в OSM нет</span>');
     it.push(OSM.residential.length ? '<span><i style="background:rgba(150,124,98,.95)"></i>застройка (OSM)</span>' : '<span>застройки в OSM нет</span>');
     it.push(OSM.forest.length ? '<span><i style="background:rgba(20,83,45,.95)"></i>лес (OSM)</span>' : `<span>лес: в OSM нет полигонов в радиусе ${(OSM.radius_m || 5000) / 1000} км</span>`);
-  } else it.push('<span>слои OSM не загружены (scripts/fetch_osm_context.py)</span>');
+  } else it.push('<span>слои OSM для площадки не загружены</span>');
   it.push('<span><i style="background:rgba(94,234,212,.6)"></i>/<i style="background:rgba(251,191,36,.7);margin-left:4px"></i>наветренный конус ±15°, 2 км: свободен / есть турбины</span>');
   $('mapLegend').innerHTML = it.join('');
   $('osmSrc').textContent = OSM.available ? `${OSM.note || 'OpenStreetMap'}, выгрузка ${OSM.fetched_at_utc || ''} UTC, радиус ${(OSM.radius_m || 5000) / 1000} км` : 'не загружены';
@@ -568,7 +587,9 @@ function updateReadouts() {
   $('vDirS').textContent = 'откуда дует; стрелка — куда';
   $('vArrow').style.transform = `rotate(${(h.wind_direction_100m + 180) % 360}deg)`;
   $('vT').innerHTML = `${h.temperature_2m > 0 ? '+' : ''}${h.temperature_2m?.toFixed(1) ?? '—'} <small>°C</small>`;
-  $('vT12').innerHTML = `${pct(h.p50_t1)} / ${pct(h.p50_t2)}`;
+  const own = D.turbines.filter(tb => h['p50_' + tb.id] != null);
+  $('vT12').innerHTML = own.length > 1 && own.length <= 3 ? own.map(tb => pct(h['p50_' + tb.id])).join(' / ')
+    : pct(own.length ? h['p50_' + own[0].id] : h.p50);
   $('vP50').innerHTML = `${pct(h.p50)} <small>%</small>`;
   $('vBand').textContent = `${pct(h.p10)}–${pct(h.p90)} %`;
   const up = upwindHits(h.wind_direction_100m), nHit = new Set(up.flatMap(u => u.hits.map(q => q.id))).size;
@@ -577,8 +598,8 @@ function updateReadouts() {
   else $('vSectorT').innerHTML = `${sec} — <b>турбины парка с наветренной стороны</b>: ` +
     up.map(u => `${u.name}: ${u.hits.length ? `${u.hits.length} шт., ближайшая ${Math.round(u.hits[0].dist)} м${u.hits.some(q => q.ours) ? ' (в т.ч. ' + u.hits.filter(q => q.ours).map(q => q.name).join(', ') + ')' : ''}` : 'свободно'}`).join('; ');
   $('vSector').classList.toggle('blocked', nHit > 0);
-  $('vSectorS').textContent = `конус ±${CONE.half_angle_deg}°, до ${CONE.range_m / 1000} км от T1/T2 навстречу ветру; ` +
-    (OSM.available ? `турбин парка в OSM: ${parkTurbines.length}` : 'данных OSM о турбинах парка нет — учтены только T1/T2');
+  $('vSectorS').textContent = `конус ±${CONE.half_angle_deg}°, до ${CONE.range_m / 1000} км от ${TLABEL} навстречу ветру; ` +
+    (OSM.available ? `турбин парка в OSM: ${parkTurbines.length}` : `данных OSM о соседних турбинах нет — учтены только ${TLABEL}`);
   updateCones(h.wind_direction_100m, up);
   $('tmark').style.left = `calc(${tempNorm(h.temperature_2m) * 100}% - 1px)`;
   if (!dragging) $('slider').value = state.t;
@@ -636,12 +657,18 @@ chart.addEventListener('pointermove', e => { if (chartDrag) chartSeek(e); });
 chart.addEventListener('pointerup', () => { chartDrag = false; });
 
 // ---------------------------------------------------------------- роза ветров
-const roseC = $('rose'), R = D.wind_rose;
+const roseC = $('rose'), R = D.wind_rose || {};
+const roseOk = k => !!(R[k] && R[k].n_hours > 0 && Array.isArray(R[k].freq_pct) && R[k].freq_pct.length === 16);
+R.speed_bins = R.speed_bins || ['0–3', '3–6', '6–9', '9–12', '12+'];
+R.colors = R.colors || ['#2b4c7e', '#2f7fb5', '#3fb8af', '#f2c14e', '#f46036'];
+if (!roseOk('all')) $('roseCard').style.display = 'none';
+if (!roseOk('feb')) $('roseFeb').closest('.seg').style.display = 'none';
 $('roseLegend').innerHTML = R.speed_bins.map((b, k) => `<span><i style="background:${R.colors[k]}"></i>${b} м/с</span>`).join('');
 function drawRose() {
+  if (!roseOk(state.rose)) { if (state.rose !== 'all' && roseOk('all')) state.rose = 'all'; else return; }
   const [g, W, Hh] = sizeCanvas(roseC), st = R[state.rose];
   const cx = W / 2, cy = Hh / 2, rad = Math.min(W, Hh) / 2 - 22;
-  const maxPct = Math.max(...st.sector_pct), ring = maxPct > 30 ? 10 : 5, rmax = Math.ceil(maxPct / ring) * ring;
+  const maxPct = Math.max(1, ...st.sector_pct), ring = maxPct > 30 ? 10 : 5, rmax = Math.ceil(maxPct / ring) * ring;
   g.clearRect(0, 0, W, Hh);
   g.font = '11px system-ui, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
   for (let v = ring; v <= rmax; v += ring) {
@@ -742,8 +769,8 @@ function frame() {
   yawTween.cur = yawTween.from + angDiff(yawTween.to, yawTween.from) * ease;
   allTurbines.forEach(tb => {
     tb.head.rotation.y = yawTween.cur;
-    // скорость ротора ∝ P50: T1/T2 — свой прогноз, турбины парка — P50 парка
-    const p = tb.id === 't1' ? w.p50_t1 : tb.id === 't2' ? w.p50_t2 : w.p50;
+    // скорость ротора ∝ P50: турбина со своим рядом прогноза — свой P50, остальные — P50 парка
+    const p = w['p50_' + tb.id] ?? w.p50;
     tb.omega = lerp(tb.omega, 2.2 * clamp(p ?? w.p50, 0, 1), Math.min(1, dt * 1.5));   // рад/с
     tb.rotor.rotation.x -= tb.omega * dt;
   });

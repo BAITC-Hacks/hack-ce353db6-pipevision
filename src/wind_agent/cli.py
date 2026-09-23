@@ -1,4 +1,4 @@
-"""Командная строка: wind-agent train | backtest | replay | forecast | live."""
+"""Командная строка: wind-agent train | backtest | replay | forecast | live | atlas | assess."""
 from __future__ import annotations
 
 import argparse
@@ -56,6 +56,19 @@ def main(argv: list[str] | None = None) -> int:
     sb = sub.add_parser("submission", parents=[common], help="собрать единый файл сдачи outputs/submission_feb2026.csv из outputs/forecasts")
     sb.add_argument("--forecasts", default=None)
 
+    at = sub.add_parser("atlas", parents=[common], help="атлас ветра Казахстана (NASA POWER) → data/atlas/kz_wind_atlas.csv")
+    at.add_argument("--force", action="store_true", help="скачать заново, даже если файл атласа уже есть")
+
+    asp = sub.add_parser("assess", parents=[common], help="оценка новой площадки ВЭС: ресурс ERA5, КИУМ, выработка, отчёт")
+    asp.add_argument("--lat", type=float, required=True, help="широта площадки")
+    asp.add_argument("--lon", type=float, required=True, help="долгота площадки")
+    asp.add_argument("--n-turbines", type=int, default=10, help="число турбин будущей ВЭС")
+    asp.add_argument("--rated-mw", type=float, default=2.5, help="номинал одной турбины, МВт")
+    asp.add_argument("--site-name", default=None, help="название площадки в отчёте")
+    asp.add_argument("--start", default="2025-01-01", help="начало периода ERA5")
+    asp.add_argument("--end", default="2025-12-31", help="конец периода ERA5")
+    asp.add_argument("--no-llm", action="store_true", help="отчёт по шаблону без LLM")
+
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     for noisy in ("httpx", "httpcore", "openai", "urllib3"):   # HTTP-клиенты логируют каждый запрос — оставляем только предупреждения
@@ -79,6 +92,29 @@ def main(argv: list[str] | None = None) -> int:
     elif a.cmd == "submission":
         from .evaluate import build_submission
         build_submission(a.forecasts)
+    elif a.cmd == "atlas":
+        from . import atlas
+        df = atlas.build_atlas(force=a.force, progress=lambda i, n, t: print(f"[{i}/{n}] {t}", flush=True))
+        kz = df[df["inside_kz"].astype(str).str.lower().isin(["true", "1"])]
+        print(json.dumps({"csv": str(atlas.ATLAS_CSV), "points": len(df), "cells_kz": len(kz),
+                          "classes": kz["resource_class"].value_counts().to_dict()}, ensure_ascii=False, indent=2))
+    elif a.cmd == "assess":
+        from .assess import assess_site, management_report, write_assessment
+        site = config.custom_site(a.lat, a.lon, n_turbines=a.n_turbines, rated_mw=a.rated_mw, name=a.site_name)
+        try:
+            res = assess_site(site, wx, a.start, a.end)
+        except Exception as e:  # noqa: BLE001 — офлайн без кэша, сеть, мало данных: понятное сообщение и код 1
+            logging.getLogger(__name__).error("оценка площадки не выполнена: %s", e)
+            return 1
+        out_dir = config.OUTPUTS_DIR / "adhoc" / site.key
+        path = write_assessment(res, out_dir)
+        rep = management_report(res, use_llm=not a.no_llm)
+        (out_dir / "assessment_report.md").write_text(rep["markdown"], encoding="utf-8")
+        print(json.dumps({"site": res["site"]["name"], "ws100_mean": res["ws100"]["mean"], "weibull": res["weibull"],
+                          "cf": res["cf"], "aep_gwh": res["aep_gwh"], "benchmark": res["benchmark"],
+                          "atlas": res["atlas"], "llm_used": rep["llm_used"], "fact_check_ok": rep["fact_check"].get("ok"),
+                          "assessment": str(path), "report": str(out_dir / "assessment_report.md")},
+                         ensure_ascii=False, indent=2))
     else:
         from .agent.orchestrator import run_live, run_replay
         use_llm = not a.no_llm

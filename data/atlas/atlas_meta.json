@@ -1,0 +1,28 @@
+{
+  "source": "NASA POWER Climatology API (MERRA-2), параметр WS50M — средняя скорость ветра на 50 м",
+  "api": "https://power.larc.nasa.gov/api/temporal/climatology/regional",
+  "period": "2001–2020",
+  "grid": "0.5° × 0.625° (MERRA-2)",
+  "extrapolation_100m": "степенной закон ws50·(100/50)^0.143",
+  "classes_ws100": {
+    "низкий": "<5.5",
+    "умеренный": "5.5–6.5",
+    "хороший": "6.5–7.5",
+    "отличный": "≥7.5"
+  },
+  "mask": "полигон kaz.geo.json + буфер 0.35°",
+  "built_at_utc": "2026-09-23T11:07:12Z",
+  "n_points_total": 2211,
+  "n_cells_kz": 1199,
+  "ws100_est_kz": {
+    "min": 2.57,
+    "mean": 6.92,
+    "max": 8.29
+  },
+  "class_counts_kz": {
+    "хороший": 821,
+    "отличный": 190,
+    "низкий": 107,
+    "умеренный": 81
+  }
+}

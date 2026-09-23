@@ -17,7 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
-ui = ["streamlit>=1.38"]   # панель оператора ui/app.py (make setup-ui), altair идёт вместе со streamlit
+ui = ["streamlit>=1.38", "plotly>=6.1"]   # панель оператора ui/app.py (make setup-ui); altair идёт со streamlit, plotly — карта Казахстана
 
 [project.scripts]
 wind-agent = "wind_agent.cli:main"

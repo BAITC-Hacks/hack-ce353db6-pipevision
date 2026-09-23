@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 PREVIOUS_RUNS_URL = "https://previous-runs-api.open-meteo.com/v1/forecast"
 HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"      # реанализ ERA5 — оценка ресурса новой площадки
 
 
 class WeatherClient:
@@ -129,6 +130,23 @@ class WeatherClient:
             except Exception as e:  # noqa: BLE001
                 log.warning("live: модель %s недоступна (%s)", m, e)
         return df.reset_index()
+
+    def archive_hourly(self, lat: float, lon: float, start: str, end: str,
+                       variables=("wind_speed_100m", "wind_direction_100m", "temperature_2m", "surface_pressure"),
+                       cache_key: str | None = None) -> pd.DataFrame:
+        """Реанализ ERA5 (Archive API) в произвольной точке: почасово, индекс UTC, колонки — variables.
+
+        Нужен для оценки новой площадки (ресурс ветра за год и больше); кэш — data/cache/openmeteo/era5__<ключ>__*.csv.
+        """
+        lat, lon = float(lat), float(lon)
+        variables = list(variables)
+        default = ["wind_speed_100m", "wind_direction_100m", "temperature_2m", "surface_pressure"]
+        kind = "era5" if variables == default else "era5-" + "-".join(v.replace("_", "") for v in variables)
+        key = cache_key or f"{lat:.3f}_{lon:.3f}"
+        params = dict(latitude=lat, longitude=lon, start_date=start, end_date=end, hourly=",".join(variables),
+                      models="era5", timezone="UTC", wind_speed_unit="ms")
+        df = self._cached_range(kind, key, start, end, lambda: self._get(ARCHIVE_URL, params))
+        return df.set_index("time")[variables]
 
     def prefetch(self, start: str = "2026-01-30", end: str = "2026-03-02") -> None:
         """Один запрос на весь тестовый период для каждой турбины и модели, чтобы не плодить мелкие файлы кэша."""

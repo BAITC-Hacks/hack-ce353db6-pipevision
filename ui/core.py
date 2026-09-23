@@ -16,7 +16,9 @@ from __future__ import annotations
 import contextlib
 import functools
 import inspect
+import json
 import logging
+import math
 import os
 import re
 import sys
@@ -118,6 +120,7 @@ class ForecastResult:
     core_log: list = field(default_factory=list)      # предупреждения ядра за время прогона: [(уровень, текст)]
     previous_issue: str | None = None
     previous: pd.DataFrame | None = None        # предыдущий выпуск (для ревизии и пунктира на графике)
+    ens_std: pd.Series | None = None            # разброс ансамбля GFS/ICON/ECMWF, ветер 100 м (м/с), индекс — UTC
     api_calls: int = 0
     elapsed_s: float = 0.0
 
@@ -174,6 +177,11 @@ def load_core() -> dict:
     except Exception:  # noqa: BLE001 — климатология нужна анализу, но прогрев необязателен
         pass
     return {"model": model, "model_version": tools.model_version(model)}
+
+
+def nurly_site() -> "SiteInfo":
+    """Паспорт ВЭС «Нурлы» (для вкладок, которые показывают результаты replay независимо от выбранной площадки)."""
+    return _site_info(getattr(config, "NURLY", None), ForecastParams())
 
 
 def nurly_points() -> list:
@@ -348,6 +356,16 @@ def run_forecast(params: ForecastParams, wx: WeatherClient | None = None, progre
         report_path = Path(session.final["report"])
         report_md = report_path.read_text(encoding="utf-8") if report_path.exists() else ""
 
+    ens_std = None
+    try:                                        # признак ens_std_ws100 из prepare_data (среднее по турбинам)
+        feats = (session.state.get("prepared") or {}).get("features") or {}
+        cols = [X["ens_std_ws100"] for X in feats.values() if "ens_std_ws100" in getattr(X, "columns", [])]
+        if cols:
+            ens_std = pd.concat(cols, axis=1).mean(axis=1)
+            ens_std.index = pd.to_datetime(ens_std.index, utc=True)
+    except Exception:  # noqa: BLE001 — разброс ансамбля необязателен
+        ens_std = None
+
     if params.use_llm and any(t.get("tool") == "llm" and t.get("status") == "error" for t in session.trace):
         notices.append("LLM недоступна или вернула ошибку — оставшиеся шаги агент выполнил по детерминированным правилам.")
 
@@ -355,6 +373,7 @@ def run_forecast(params: ForecastParams, wx: WeatherClient | None = None, progre
         params=params, site=site, forecast=session.state["forecast"].copy(), analysis=session.state["analysis"],
         final=dict(session.final), trace=list(session.trace), meta=dict(session.state.get("weather", {}).get("meta", {})),
         report_md=report_md, notices=notices, core_log=list(core_log), previous_issue=previous_issue, previous=previous,
+        ens_std=ens_std,
         api_calls=api_calls, elapsed_s=round(time.perf_counter() - t0, 2))
 
 
@@ -399,7 +418,7 @@ def daily_table(view: pd.DataFrame, series: list[str], label, scale=None, unit: 
 def hourly_table(view: pd.DataFrame, series: list[str], label, scale=None, unit: str = "доля ном.") -> pd.DataFrame:
     """Почасовая таблица: время, упреждение, P10/P50/P90 по рядам (× scale(series) — в МВт), погода по первому ряду."""
     base = view[view["turbine"] == series[0]].sort_values("lead_hours")
-    out = pd.DataFrame({"Время": base["time_local"].dt.strftime("%d.%m %H:%M").values,
+    out = pd.DataFrame({"Местное время": base["time_local"].values,
                         "Упреждение, ч": base["lead_hours"].astype(int).values})
     for s in series:
         d = view[view["turbine"] == s].sort_values("lead_hours")
@@ -615,4 +634,331 @@ def load_uploaded_actual(files) -> dict:
         if key in out:
             key = f"t{len(out) + 1}"
         out[key] = load_actual_hourly(f)
+    return out
+
+
+# ---------------------------------------------------------------- «почему такой прогноз»
+WORK_ZONE_MS = (6.0, 12.0)                      # рабочая зона кривой мощности: от заметной выработки до номинала
+ENS_STD_TERCILES = (2.1, 2.4)                   # терцили среднего ens_std_ws100 по 28 выпускам 31.01–27.02.2026, м/с
+CONE_HALF_DEG, CONE_RANGE_M, OSM_MATCH_M = 15.0, 2000.0, 80.0   # как в viz/index.html и scripts/build_viz_data.py
+OSM_CONTEXT = config.ROOT / "data" / "terrain" / "osm_context.json"
+COMPASS_RU = ["С", "ССВ", "СВ", "ВСВ", "В", "ВЮВ", "ЮВ", "ЮЮВ", "Ю", "ЮЮЗ", "ЮЗ", "ЗЮЗ", "З", "ЗСЗ", "СЗ", "ССЗ"]
+MONTHS_RU = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь",
+             "декабрь"]
+
+
+def compass(deg: float) -> str:
+    return COMPASS_RU[int(((deg % 360) + 11.25) // 22.5) % 16]
+
+
+@functools.lru_cache(maxsize=1)
+def park_layout() -> dict | None:
+    """T1/T2 и остальные турбины парка из OSM в локальных метрах (x — восток, y — север) от центра osm_context."""
+    if not OSM_CONTEXT.exists():
+        return None
+    d = json.loads(OSM_CONTEXT.read_text(encoding="utf-8"))
+    lat0, lon0 = float(d["center"]["lat"]), float(d["center"]["lon"])
+    kx, ky = 111320 * math.cos(math.radians(lat0)), 111132
+    ours = {k: ((lon - lon0) * kx, (lat - lat0) * ky) for k, lat, lon in nurly_points()}
+    others = []
+    for el in d.get("elements", []):
+        if el.get("type") == "node" and (el.get("tags") or {}).get("power") == "generator":
+            x, y = (float(el["lon"]) - lon0) * kx, (float(el["lat"]) - lat0) * ky
+            if min(math.hypot(x - ox, y - oy) for ox, oy in ours.values()) > OSM_MATCH_M:
+                others.append((x, y))
+    return {"ours": ours, "others": others}
+
+
+def upwind_count(wd: float, layout: dict) -> int:
+    """Турбины (без повторов) в конусе ±15° до 2 км навстречу ветру от T1/T2 — как upwindHits в viz/index.html."""
+    targets = [("t:" + k, x, y) for k, (x, y) in layout["ours"].items()] + \
+              [(f"osm{i}", x, y) for i, (x, y) in enumerate(layout["others"])]
+    hit = set()
+    for k, (ox, oy) in layout["ours"].items():
+        for tid, x, y in targets:
+            if tid == "t:" + k:
+                continue
+            dx, dy = x - ox, y - oy
+            dist = math.hypot(dx, dy)
+            if dist < 1 or dist > CONE_RANGE_M:
+                continue
+            brg = (math.degrees(math.atan2(dx, dy)) + 360) % 360
+            if abs(((brg - wd + 540) % 360) - 180) <= CONE_HALF_DEG:
+                hit.add(tid)
+    return len(hit)
+
+
+def why_lines(res: "ForecastResult", view: pd.DataFrame) -> list[tuple[str, str, str]]:
+    """4–6 строк «показатель — значение — что это значит для выработки» из данных (без LLM)."""
+    main = FARM if FARM in set(view["turbine"]) else res.series[0]
+    d = view[view["turbine"] == main].sort_values("lead_hours")
+    out = []
+    ws = d["wind_speed_100m"].astype(float)
+    if ws.notna().any():
+        share = float(((ws >= WORK_ZONE_MS[0]) & (ws <= WORK_ZONE_MS[1])).mean())
+        low, high = float((ws < WORK_ZONE_MS[0]).mean()), float((ws > WORK_ZONE_MS[1]).mean())
+        if share >= 0.5:
+            mean_txt = "основная выработка на рабочем участке кривой, чувствительна к ошибке ветра"
+        elif low >= 0.5:
+            mean_txt = "преобладает слабый ветер — выработка ниже половины номинала"
+        elif high >= 0.5:
+            mean_txt = "преобладает сильный ветер — работа около номинала"
+        else:
+            mean_txt = "режим переменный — выработка неравномерна по часам"
+        out.append(("Ветер 100 м", f"{ws.mean():.1f} м/с, {100 * share:.0f} % часов в зоне "
+                                   f"{WORK_ZONE_MS[0]:.0f}–{WORK_ZONE_MS[1]:.0f} м/с", mean_txt))
+    wd = d["wind_direction_100m"].astype(float).to_numpy()
+    w = d["p50"].astype(float).to_numpy() + 1e-3
+    if len(wd) and np.isfinite(wd).any():
+        ok = np.isfinite(wd)
+        rad = np.deg2rad(wd[ok])
+        mean_dir = float((np.degrees(np.arctan2((w[ok] * np.sin(rad)).sum(), (w[ok] * np.cos(rad)).sum())) + 360) % 360)
+        layout = park_layout() if not res.site.transfer else None
+        if layout:
+            n = upwind_count(mean_dir, layout)
+            per_hour = np.array([upwind_count(float(x), layout) > 0 for x in wd[ok]])
+            wake_share = float((w[ok] * per_hour).sum() / w[ok].sum())
+            meaning = (f"наветренная сторона свободна — потерь в следе не ожидается" if n == 0 else
+                       f"{100 * wake_share:.0f} % выработки в зоне следа соседних турбин — возможны потери")
+            out.append(("Направление", f"{compass(mean_dir)} {mean_dir:.0f}°, с наветренной стороны {n} турб.", meaning))
+        else:
+            out.append(("Направление", f"{compass(mean_dir)} {mean_dir:.0f}°", "схемы парка нет — след не оценивается"))
+    if res.ens_std is not None and len(res.ens_std):
+        t = pd.to_datetime(d["target_time_utc"], utc=True)
+        e = res.ens_std.reindex(t).astype(float)
+        if e.notna().any():
+            m = float(e.mean())
+            lo, hi = ENS_STD_TERCILES
+            meaning = ("модели согласованы — прогноз ветра надёжнее обычного" if m < lo else
+                       "обычное расхождение моделей" if m <= hi else "модели расходятся сильнее обычного — выше неопределённость")
+            out.append(("Разброс ансамбля", f"{m:.1f} м/с (GFS/ICON/ECMWF)", meaning))
+    a = res.analysis
+    rev = (a.get("revision") or {}).get(FARM) if a.get("revision") else None
+    if rev:
+        sig = rev["mae"] > REVISION_MAE_THRESHOLD
+        word = "выше" if rev["bias"] > 0 else "ниже"
+        meaning = (f"прогноз погоды пересмотрен: выработка {word} прежней оценки" if sig else "прогноз устойчив к обновлению погоды")
+        out.append(("Ревизия к D−1", f"MAE {rev['mae']:.2f}, смещение {rev['bias']:+.2f} доли ном.", meaning))
+    m = (a.get("metrics") or {}).get(FARM) or (a.get("metrics") or {}).get(main) or {}
+    if m.get("climatology_mean") and m.get("vs_climatology_pct") is not None:
+        month = MONTHS_RU[int(pd.Timestamp(d["time_local"].iloc[0]).month) - 1] if len(d) else "месяц"
+        pct = float(m["vs_climatology_pct"])
+        meaning = ("близко к обычной выработке" if abs(pct) <= 15 else
+                   f"выработка {'выше' if pct > 0 else 'ниже'} обычной для месяца")
+        out.append((f"Норма ({month})", f"{m['mean_p50']:.2f} против {m['climatology_mean']:.2f} ({pct:+.0f} %)", meaning))
+    return out[:6]
+
+
+# ---------------------------------------------------------------- тестовый период (результаты replay, только чтение)
+REPLAY_SUMMARY = config.OUTPUTS_DIR / "replay_summary.csv"
+LATEST_BY_TARGET = config.OUTPUTS_DIR / "forecasts" / "latest_by_target.csv"
+TEST_START, TEST_END = date.fromisoformat(config.TEST_ISSUE_START), date.fromisoformat(config.TEST_ISSUE_END)
+
+
+def replay_stamp() -> tuple:
+    return tuple(int(p.stat().st_mtime) if p.exists() else 0 for p in (REPLAY_SUMMARY, LATEST_BY_TARGET))
+
+
+def load_replay() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    """(сшитый прогноз парка: последний выпуск на каждый час + previous_p50 и revision, сводка выпусков)."""
+    stitched = summary = None
+    try:
+        df = pd.read_csv(LATEST_BY_TARGET)
+        df = df[df["turbine"] == FARM].copy()
+        df["time_local"] = pd.to_datetime(df["target_time_local"].astype(str).str[:19])
+        stitched = df.sort_values("time_local").reset_index(drop=True)
+    except Exception:  # noqa: BLE001 — файла может не быть до make replay
+        stitched = None
+    try:
+        summary = pd.read_csv(REPLAY_SUMMARY)
+        summary = summary[summary["issue_date"].astype(str).str.match(r"\d{4}-\d{2}-\d{2}$")]
+        summary = summary.sort_values("issue_date").reset_index(drop=True)
+    except Exception:  # noqa: BLE001
+        summary = None
+    return stitched, summary
+
+
+# ---------------------------------------------------------------- атлас, оценка площадки, 3D-сцена (модули ядра необязательны)
+KZ_GEO = config.ROOT / "data" / "atlas" / "kaz.geo.json"
+ATLAS_STEP = 0.5                                # шаг сетки атласа, °
+STUDY_START, STUDY_END = "2025-01-01", "2025-12-31"   # год ERA5 для оценки ресурса
+STUDY_STEPS = ("Атлас ветра", "ERA5 за год и оценка ресурса", "Прогноз 48 ч переносом модели", "Рельеф и 3D-сцена",
+               "Отчёт для руководства")
+
+
+def _optional(name: str):
+    """Модуль ядра wind_agent.<name> или None, если в этой сборке его нет (или он не импортируется)."""
+    import importlib
+    try:
+        return importlib.import_module(f"wind_agent.{name}")
+    except Exception:  # noqa: BLE001 — раздел панели покажет «недоступно в этой сборке»
+        return None
+
+
+def backend() -> dict:
+    """Какие модули площадочного анализа есть в сборке: atlas, assess, vizdata."""
+    return {n: _optional(n) is not None for n in ("atlas", "assess", "vizdata")}
+
+
+@functools.lru_cache(maxsize=1)
+def kz_outline() -> list[list[tuple[float, float]]]:
+    """Контур Казахстана [(lon, lat)] — из atlas.kz_polygon() или data/atlas/kaz.geo.json."""
+    atlas = _optional("atlas")
+    if atlas is not None and hasattr(atlas, "kz_polygon"):
+        try:
+            return [[(float(x), float(y)) for x, y in atlas.kz_polygon()]]
+        except Exception:  # noqa: BLE001
+            pass
+    if not KZ_GEO.exists():
+        return []
+    gj = json.loads(KZ_GEO.read_text(encoding="utf-8"))
+    rings = []
+    for f in gj.get("features", []):
+        g = f.get("geometry") or {}
+        polys = [g["coordinates"]] if g.get("type") == "Polygon" else g.get("coordinates", [])
+        rings += [[(float(x), float(y)) for x, y in p[0]] for p in polys]
+    return rings
+
+
+def in_kz(lat: float, lon: float) -> bool:
+    atlas = _optional("atlas")
+    if atlas is not None and hasattr(atlas, "in_kazakhstan"):
+        try:
+            return bool(atlas.in_kazakhstan(lat, lon))
+        except Exception:  # noqa: BLE001
+            pass
+    rings = kz_outline()
+    if not rings:
+        return KZ_LAT[0] <= lat <= KZ_LAT[1] and KZ_LON[0] <= lon <= KZ_LON[1]
+    from matplotlib.path import Path as MPath
+    return any(MPath(r).contains_point((lon, lat)) for r in rings)
+
+
+def atlas_grid() -> dict | None:
+    """Ячейки атласа для карты: {"cells": DataFrame[id, lat, lon, ws100_est, ws50_ann, resource_class], "geojson"}.
+    None — модуля атласа нет; тогда карта показывает контур и сетку центров без цвета."""
+    atlas = _optional("atlas")
+    if atlas is None:
+        return None
+    try:
+        gj = atlas.grid_cells_geojson()
+        rows = []
+        for f in gj.get("features", []):
+            p = f.get("properties") or {}
+            rows.append({"id": str(f.get("id") or f"{p.get('lat')}_{p.get('lon')}"), "lat": float(p["lat"]),
+                         "lon": float(p["lon"]), "ws100_est": float(p.get("ws100_est") or np.nan),
+                         "ws50_ann": float(p.get("ws50_ann") or np.nan), "resource_class": str(p.get("resource_class") or "")})
+        if not rows:
+            return None
+        return {"cells": pd.DataFrame(rows), "geojson": gj}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def fallback_centers() -> pd.DataFrame:
+    """Центры ячеек 0.5° внутри контура Казахстана (без атласа — для выбора точки кликом)."""
+    lats = np.arange(KZ_LAT[0] + ATLAS_STEP / 2, KZ_LAT[1], ATLAS_STEP)
+    lons = np.arange(KZ_LON[0] + ATLAS_STEP / 2, KZ_LON[1], ATLAS_STEP)
+    pts = [(round(float(a), 2), round(float(o), 2)) for a in lats for o in lons]
+    rings = kz_outline()
+    if rings:
+        from matplotlib.path import Path as MPath
+        paths = [MPath(r) for r in rings]
+        pts = [(a, o) for a, o in pts if any(p.contains_point((o, a)) for p in paths)]
+    return pd.DataFrame(pts, columns=["lat", "lon"])
+
+
+def nearest_cell(lat: float, lon: float) -> dict | None:
+    atlas = _optional("atlas")
+    if atlas is None:
+        return None
+    try:
+        return dict(atlas.nearest_cell(float(lat), float(lon)))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@dataclass(frozen=True)
+class StudyParams:
+    lat: float
+    lon: float
+    n_turbines: int = 10
+    rated_mw: float = 2.5
+    name: str = ""
+
+    def key(self) -> tuple:
+        return (round(self.lat, 3), round(self.lon, 3), int(self.n_turbines), round(float(self.rated_mw), 2))
+
+    @property
+    def label(self) -> str:
+        return self.name.strip() or f"Площадка {self.lat:.2f}° с. ш., {self.lon:.2f}° в. д."
+
+
+def _forecast_summary(res: ForecastResult) -> dict:
+    """Короткая сводка прогноза 48 ч для отчёта руководству (числа — из того же анализа, что в панели)."""
+    v = res.view(48)
+    main = FARM if FARM in set(v["turbine"]) else res.series[0]
+    s = series_stats(v, main)
+    cap = res.site.capacity_mw(main) or 1.0
+    return {"выпуск прогноза (live)": res.issue_label, "часов прогноза": s["hours"],
+            "энергия 48 ч P50, МВт·ч": round(s["energy"] * cap, 1), "энергия 48 ч P10, МВт·ч": round(s["energy_p10"] * cap, 1),
+            "энергия 48 ч P90, МВт·ч": round(s["energy_p90"] * cap, 1), "средняя загрузка P50, доля ном.": s["mean_p50"],
+            "пик P50, МВт": round(s["max_p50"] * cap, 2), "средний ветер 100 м, м/с": s["wind_mean"],
+            "решение агента": str(res.final.get("decision") or "—")}
+
+
+def run_assessment(p: StudyParams, wx: WeatherClient | None = None, progress=None) -> dict:
+    """Исследование площадки: атлас → ERA5 за год (assess_site) → прогноз 48 ч (live, перенос модели) →
+    рельеф и 3D-сцена (vizdata) → отчёт для руководства (assess.management_report, LLM при наличии ключа).
+
+    progress(i, label, state) — state ∈ {"run", "done", "skip", "error"}. Шаги независимы: ошибка одного
+    не останавливает остальные, текст ошибки — в out["errors"][label]."""
+    wx = wx or WeatherClient(offline=False)
+    out: dict = {"params": p, "cell": None, "assessment": None, "forecast_result": None, "viz_html": None,
+                 "report": None, "errors": {}, "skipped": [], "started": time.time()}
+    say = progress or (lambda *a: None)
+    atlas, assess, vizdata = _optional("atlas"), _optional("assess"), _optional("vizdata")
+    site = config.custom_site(p.lat, p.lon, n_turbines=int(p.n_turbines), rated_mw=float(p.rated_mw),
+                              name=p.name.strip() or None)
+
+    def sub(i):                                 # сообщения модулей ядра о ходе шага: progress(msg) или progress(k, n, msg)
+        return lambda *args: say(i, f"{STUDY_STEPS[i]} · {str(args[-1] if args else '').strip()[:90]}", "run")
+
+    def step(i, fn, available=True):
+        label = STUDY_STEPS[i]
+        if not available:
+            out["skipped"].append(label)
+            say(i, label, "skip")
+            return None
+        say(i, label, "run")
+        try:
+            r = fn()
+            say(i, label, "done")
+            return r
+        except Exception as e:  # noqa: BLE001 — короткое сообщение в панель, без трейсбека
+            out["errors"][label] = f"{type(e).__name__}: {str(e)[:200]}"
+            say(i, label, "error")
+            return None
+
+    out["cell"] = step(0, lambda: dict(atlas.nearest_cell(p.lat, p.lon)), atlas is not None)
+    out["assessment"] = step(1, lambda: assess.assess_site(site, wx, start=STUDY_START, end=STUDY_END, progress=sub(1)),
+                             assess is not None)
+    fp = ForecastParams(site=CUSTOM_KEY, lat=p.lat, lon=p.lon, n_turbines=int(p.n_turbines), rated_mw=float(p.rated_mw),
+                        name=p.name, mode=MODE_LIVE, horizon=48, use_llm=False)
+    res = out["forecast_result"] = step(2, lambda: run_forecast(fp, wx=wx, progress=sub(2)))
+
+    def scene():
+        payload = vizdata.viz_payload(site, res.forecast if res is not None else None, fetch=True, progress=sub(3))
+        return vizdata.viz_html(payload, res.issue_label if res is not None else date.today().isoformat())
+    out["viz_html"] = step(3, scene, vizdata is not None)
+
+    def report():
+        summary = _forecast_summary(res) if res is not None else None
+        return dict(assess.management_report(out["assessment"], forecast_summary=summary, use_llm=llm_available()))
+    if assess is not None and out["assessment"] is None:
+        out["errors"][STUDY_STEPS[4]] = "не построен: нет оценки ресурса"
+        say(4, STUDY_STEPS[4], "error")
+    else:
+        out["report"] = step(4, report, assess is not None)
+    out["elapsed_s"] = round(time.time() - out["started"], 1)
     return out
