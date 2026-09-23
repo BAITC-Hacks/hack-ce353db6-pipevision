@@ -1,0 +1,3 @@
+lead_day,eligible_transitions,actual_ramps,predicted_ramps,correct_direction_ramps,directional_recall_pct,directional_precision_pct,delta_mae
+1,2806,181,28,11,6.077348066298343,39.285714285714285,0.09386353671820515
+2,2806,181,28,8,4.419889502762431,28.571428571428573,0.0958901003692973
