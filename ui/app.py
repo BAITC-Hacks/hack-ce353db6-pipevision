@@ -35,6 +35,7 @@ except Exception:  # noqa: BLE001
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import core  # noqa: E402
 import motion  # noqa: E402
+import pdf_export  # noqa: E402
 
 st.set_page_config(page_title="WindAgent — панель оператора ВЭС", layout="wide")
 
@@ -239,6 +240,17 @@ def sidebar() -> tuple[core.ForecastParams, bool]:
     params = core.ForecastParams(site=core.NURLY_KEY, mode=mode, issue_date=issue_date, issue_hour=int(issue_hour),
                                  horizon=int(horizon), use_llm=bool(use_llm and has_key))
     return params, run
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def report_pdf(md: str, title: str) -> bytes | None:
+    """Markdown-отчёт → PDF (кэш по тексту); None, если экспорт недоступен или упал."""
+    if not md or not pdf_export.AVAILABLE:
+        return None
+    try:
+        return pdf_export.markdown_to_pdf(md, title)
+    except Exception:  # noqa: BLE001 — PDF не должен ронять панель
+        return None
 
 
 # ---------------------------------------------------------------- запуск
@@ -621,7 +633,10 @@ def tab_tables(res: core.ForecastResult, view: pd.DataFrame, horizon: int, unit:
             cfg[c] = cc.NumberColumn(format=fmt, width="small")
         st.dataframe(hourly, hide_index=True, height=420, column_config=cfg, **_stretch(st.dataframe))
     stem = file_stem(res)
-    c1, c2, _ = st.columns([1, 1, 3])
+    c1, c2, c3, _ = st.columns([1, 1, 1, 2])
+    pdf = report_pdf(res.report_md, f"Отчёт агента WindAgent · {stem}")
+    c3.download_button("Отчёт · PDF", data=pdf or b"", file_name=f"report_{stem}.pdf", mime="application/pdf",
+                       key="tab_pdf", disabled=pdf is None, **_stretch(st.download_button))
     c1.download_button("Экспорт CSV", data=core.forecast_csv(view), file_name=f"forecast_{stem}_{horizon}h.csv",
                        mime="text/csv", help="Почасовой прогноз для выбранного периода", **_stretch(st.download_button))
     c2.download_button("Отчёт полного выпуска · 48 ч", data=res.report_md.encode("utf-8"), file_name=f"report_{stem}.md",
@@ -1151,9 +1166,12 @@ def study_section(study: dict) -> None:
 
     rep = study.get("report")
     if rep and rep.get("markdown"):
-        c1, c2 = st.columns([5, 1], **_kw(st.columns, vertical_alignment="bottom"))
+        c1, c3, c2 = st.columns([4, 1, 1], **_kw(st.columns, vertical_alignment="bottom"))
         c1.markdown("**Отчёт для руководства**")
         stem = f"site_{p.lat:.2f}_{p.lon:.2f}_{p.n_turbines}x{p.rated_mw:.1f}".replace(".", "p")
+        pdf = report_pdf(str(rep["markdown"]), f"Оценка площадки ВЭС · {p.lat:.2f}, {p.lon:.2f}")
+        c3.download_button("Скачать PDF", data=pdf or b"", file_name=f"report_{stem}.pdf", mime="application/pdf",
+                           key="dl_study_pdf", disabled=pdf is None, **_stretch(st.download_button))
         c2.download_button("Скачать .md", data=str(rep["markdown"]).encode("utf-8"), file_name=f"report_{stem}.md",
                            mime="text/markdown", key="dl_study_md", **_stretch(st.download_button))
         fc = rep.get("fact_check") or {}
@@ -1315,7 +1333,10 @@ def changes_block(res: core.ForecastResult, view: pd.DataFrame, a: dict) -> None
 
 def actions_row(res: core.ForecastResult, view: pd.DataFrame, horizon: int) -> None:
     stem = file_stem(res)
-    c1, c2, _ = st.columns([1, 1, 3])
+    c1, c2, c3, _ = st.columns([1, 1, 1, 2])
+    pdf = report_pdf(res.report_md, f"Отчёт агента WindAgent · {stem}")
+    c3.download_button("Отчёт 48 ч · PDF", data=pdf or b"", file_name=f"report_{stem}.pdf", mime="application/pdf",
+                       key="act_pdf", disabled=pdf is None, **_stretch(st.download_button))
     c1.download_button("Экспорт CSV", data=core.forecast_csv(view), file_name=f"forecast_{stem}_{horizon}h.csv",
                        mime="text/csv", key="act_csv", help="Почасовой прогноз для выбранного периода", **_stretch(st.download_button))
     c2.download_button("Отчёт 48 ч", data=res.report_md.encode("utf-8"), file_name=f"report_{stem}.md",
