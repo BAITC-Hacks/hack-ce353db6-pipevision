@@ -21,6 +21,8 @@ help:
 	@echo "make backtest     честный бэктест дек.2025-янв.2026 -> outputs/backtest_metrics.json"
 	@echo "make train        переобучить финальную модель -> models/power_model.joblib"
 	@echo "make live         оперативный прогноз по текущему прогнозу погоды (нужна сеть)"
+	@echo "make setup-ui     доустановить streamlit для панели оператора (extra [ui])"
+	@echo "make ui           панель оператора ВЭС (Streamlit) на http://localhost:$(UI_PORT)"
 	@echo "make viz          данные для 3D-визуализации рельефа и поля ветра"
 	@echo "make docker       собрать Docker-образ wind-agent; make docker-replay - прогон в контейнере"
 	@echo "make clean        удалить кэши Python/pytest (результаты и модель не трогает)"
@@ -56,6 +58,22 @@ forecast:
 
 live:
 	$(WA) live
+
+# Панель оператора (Streamlit): extra [ui] не входит в основные зависимости — тесты и CLI его не тянут
+.PHONY: ui setup-ui
+UI_PORT ?= 8501
+
+setup-ui:
+	@[ -x $(BIN)/python ] || $(MAKE) setup
+	@if command -v uv >/dev/null 2>&1; then \
+	    uv pip install --python $(BIN)/python -e ".[dev,ui]" -c requirements.lock; \
+	else \
+	    $(BIN)/python -m pip install -e ".[dev,ui]" -c requirements.lock; \
+	fi
+
+ui:
+	@[ -x $(BIN)/streamlit ] || { echo ">> streamlit не установлен: make setup-ui"; exit 1; }
+	$(BIN)/streamlit run ui/app.py --server.port $(UI_PORT)
 
 test:
 	$(BIN)/python -m pytest -q

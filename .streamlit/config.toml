@@ -1,0 +1,9 @@
+# Тема панели оператора (ui/app.py). Нейтральный акцент вместо красного по умолчанию: в панели
+# красный зарезервирован за ошибками, янтарный — за предупреждениями (ISA-101). Светлая/тёмная — по системе.
+[theme.light]
+primaryColor = "#475569"
+backgroundColor = "#f5f6f8"
+secondaryBackgroundColor = "#e9ecf1"
+
+[theme.dark]
+primaryColor = "#94a3b8"

@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+ui = ["streamlit>=1.38"]   # панель оператора ui/app.py (make setup-ui), altair идёт вместе со streamlit
 
 [project.scripts]
 wind-agent = "wind_agent.cli:main"

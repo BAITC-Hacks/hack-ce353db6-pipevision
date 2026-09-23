@@ -529,7 +529,8 @@ issues.forEach((f, k) => {
   o.textContent = `${d.date} 23:00 → ${h0 ? h0.date.slice(0, 5) : ''}–${h1 ? h1.date.slice(0, 5) : ''}`;
   sel.appendChild(o);
 });
-const pref = issues.findIndex(f => f.issue_date === '2026-02-10');
+const want = issues.findIndex(f => f.issue_date === window.VIZ_DEFAULT_ISSUE);   // дата из панели оператора (ui/app.py)
+const pref = want >= 0 ? want : issues.findIndex(f => f.issue_date === '2026-02-10');
 state.issue = pref >= 0 ? pref : issues.length - 1; sel.value = state.issue;
 const isSample = D.forecast_source === 'sample';
 $('srcBadge').textContent = isSample ? 'ОБРАЗЕЦ прогноза (модель + архив Open-Meteo)' : `прогнозы: outputs/forecasts · ${issues.length} выпусков`;

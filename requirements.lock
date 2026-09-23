@@ -41,3 +41,4 @@ truststore==0.10.4
 typing-extensions==4.16.0
 typing-inspection==0.4.4
 urllib3==2.8.0
+streamlit==1.64.0

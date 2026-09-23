@@ -454,7 +454,9 @@ wind-agent evaluate --actual <полный_turbine_1.csv> <полный_turbine_
 
 ## 11. Ссылка на deployed-версию
 
-Нет. Решение запускается локально (CLI) или в Docker ([раздел 7](#вариант-г-docker)).
+**Панель оператора:** https://windagent-nurly-production.up.railway.app — развёрнута на Railway из `deploy/Dockerfile.ui` (Streamlit; см. [`ui/README.md`](ui/README.md)). В образе лежат данные, кэш архивных прогнозов и модель, поэтому ретроспектива по ВЭС «Нурлы» работает без внешних запросов; live-режим и другие площадки обращаются к Open-Meteo. LLM-режим на сервере включается переменной `OPENAI_API_KEY` в настройках сервиса. Локально: `make setup-ui && make ui` (http://localhost:8501) или `docker build -f deploy/Dockerfile.ui -t wind-agent-ui . && docker run --rm -p 8501:8501 wind-agent-ui`.
+
+CLI-версия запускается локально или в Docker ([раздел 7](#вариант-г-docker)).
 
 ## 12. Потенциал развития
 
